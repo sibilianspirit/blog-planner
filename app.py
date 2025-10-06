@@ -28,20 +28,29 @@ def generate_titles(api_key, keyword, volume, competitor_url):
     try:
         client = openai.OpenAI(api_key=api_key)
         
+        # ZAKTUALIZOWANY PROMPT ZGODNIE Z WYTYCZNYMI
         prompt = f"""
-        Jesteś światowej klasy strategiem contentu SEO i copywriterem. Twoim zadaniem jest tworzenie propozycji tytułów artykułów blogowych, które mają ogromną szansę na zdobycie wysokich pozycji w Google i przyciągnięcie uwagi czytelnika.
+        Jesteś ekspertem SEO i copywriterem specjalizującym się w tworzeniu angażujących tytułów na polskojęzyczne blogi.
 
         Przeanalizuj poniższe dane:
-        - Słowo kluczowe do targetowania: "{keyword}"
+        - Słowo kluczowe do użycia: "{keyword}"
         - Miesięczny wolumen wyszukiwania: {volume}
-        - Przykładowy artykuł konkurencji, który już jest w TOP10: {competitor_url}
+        - Artykuł konkurencji: {competitor_url}
 
         Twoje zadanie:
-        Zaproponuj 3 unikalne, angażujące i zoptymalizowane pod SEO tytuły artykułów blogowych. Skup się na intencji użytkownika, która jest głównie informacyjna. Tytuły powinny być w formie listy numerowanej (1. Tytuł 1, 2. Tytuł 2, 3. Tytuł 3). Bądź kreatywny i unikaj prostego powtarzania słowa kluczowego.
+        Zaproponuj 3 unikalne tytuły artykułów blogowych.
+
+        Zasady, których musisz bezwzględnie przestrzegać:
+        1. Każdy tytuł musi zawierać dokładną frazę kluczową: "{keyword}".
+        2. Tytuły muszą mieć charakter informacyjny lub poradnikowy (np. "Jak...", "Co to jest...", "Przewodnik po...").
+        3. Stosuj polskie zasady pisowni – tylko pierwsza litera w tytule wielka (reszta małymi, chyba że to nazwa własna).
+        4. Zamiast dwukropka używaj myślnika (np. "Tytuł – podtytuł").
+        5. Zwróć odpowiedź wyłącznie w formie listy numerowanej (1. Tytuł, 2. Tytuł, 3. Tytuł), bez żadnych dodatkowych wstępów ani wyjaśnień.
         """
         
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            # ZMIANA MODELU NA GPT-4 TURBO
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": "Jesteś ekspertem SEO i copywriterem."},
                 {"role": "user", "content": prompt}
@@ -65,7 +74,6 @@ def generate_titles(api_key, keyword, volume, competitor_url):
 st.title("🚀 Planer Treści SEO oparty o Analizę Content Gap")
 st.markdown("Aplikacja do automatycznego planowania treści blogowych. Wgraj plik z analizą luki w treści oraz listę swoich artykułów, a aplikacja zidentyfikuje istniejące treści i wygeneruje propozycje nowych.")
 
-# Kolumny dla lepszego układu
 col1, col2 = st.columns(2)
 
 with col1:
@@ -95,7 +103,7 @@ if st.button("Uruchom Analizę", type="primary"):
     elif content_gap_file is None or my_articles_file is None:
         st.warning("Upewnij się, że wgrałeś oba pliki CSV.")
     else:
-        with st.spinner("Przeprowadzam analizę... To może potrwać kilka minut."):
+        with st.spinner("Przeprowadzam analizę... Użycie GPT-4 może potrwać nieco dłużej."):
             try:
                 df_gap = pd.read_csv(content_gap_file)
                 df_articles = pd.read_csv(my_articles_file)
