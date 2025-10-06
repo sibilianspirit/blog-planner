@@ -13,7 +13,7 @@ st.set_page_config(page_title="Planer Treści SEO", layout="wide")
 
 @st.cache_resource
 def load_model():
-    """Ładuje i cachuje model SentenceTransformer, aby nie ładować go przy każdym odświeżeniu."""
+    """Ładuje i cachuje model SentenceTransformer."""
     return SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
 
 def find_first_competitor_url(row):
@@ -26,7 +26,6 @@ def find_first_competitor_url(row):
 def generate_titles(api_key, keyword, volume, competitor_url):
     """Generuje tytuły za pomocą API OpenAI."""
     try:
-        # Ustawienie klucza API dla biblioteki OpenAI
         client = openai.OpenAI(api_key=api_key)
         
         prompt = f"""
@@ -52,7 +51,6 @@ def generate_titles(api_key, keyword, volume, competitor_url):
         )
         
         content = response.choices[0].message.content
-        # Parsowanie listy numerowanej
         titles = re.findall(r'\d+\.\s*(.*)', content)
         while len(titles) < 3:
             titles.append("---")
@@ -72,7 +70,11 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.header("1. Konfiguracja")
-    openai_api_key = st.text_input("Klucz API OpenAI (ChatGPT)", type="password", help="Twój klucz nie będzie nigdzie zapisywany.")
+    num_to_generate = st.number_input(
+        "Liczba nowych artykułów do wygenerowania", 
+        min_value=1, value=20,
+        help="Określ, dla ilu najważniejszych słów kluczowych (z największym wolumenem) chcesz wygenerować propozycje tytułów."
+    )
     similarity_threshold = st.slider(
         "Próg podobieństwa semantycznego", 
         min_value=0.5, max_value=1.0, value=0.75, step=0.01,
@@ -87,13 +89,13 @@ with col2:
 # --- Logika Aplikacji ---
 
 if st.button("Uruchom Analizę", type="primary"):
+    openai_api_key = st.secrets.get("OPENAI_API_KEY")
     if not openai_api_key:
-        st.warning("Podaj swój klucz API OpenAI, aby kontynuować.")
+        st.error("Klucz API OpenAI nie został znaleziony w sekretach Streamlit! Upewnij się, że dodałeś go w ustawieniach aplikacji.")
     elif content_gap_file is None or my_articles_file is None:
         st.warning("Upewnij się, że wgrałeś oba pliki CSV.")
     else:
-        with st.spinner("Przeprowadzam analizę... To może potrwać kilka minut w zależności od liczby słów kluczowych."):
-            # 1. Wczytanie i przygotowanie danych
+        with st.spinner("Przeprowadzam analizę... To może potrwać kilka minut."):
             try:
                 df_gap = pd.read_csv(content_gap_file)
                 df_articles = pd.read_csv(my_articles_file)
@@ -104,12 +106,10 @@ if st.button("Uruchom Analizę", type="primary"):
                 
                 st.info(f"Znaleziono {len(df_gap)} słów kluczowych w analizie content gap.")
                 st.info(f"Znaleziono {len(df_articles)} unikalnych artykułów do analizy.")
-
             except Exception as e:
-                st.error(f"Błąd podczas wczytywania lub czyszczenia plików CSV: {e}")
+                st.error(f"Błąd podczas wczytywania plików CSV: {e}")
                 st.stop()
 
-            # 2. Analiza semantyczna
             model = load_model()
             
             corpus_embeddings = model.encode(df_articles['Title'].tolist(), convert_to_tensor=True, show_progress_bar=True)
@@ -117,7 +117,6 @@ if st.button("Uruchom Analizę", type="primary"):
             
             hits = util.semantic_search(query_embeddings, corpus_embeddings, top_k=1)
             
-            # 3. Przygotowanie wyników
             results = []
             for i, row in df_gap.iterrows():
                 keyword = row['Keyword']
@@ -126,54 +125,41 @@ if st.button("Uruchom Analizę", type="primary"):
                 
                 if best_hit['score'] > similarity_threshold:
                     matched_article_url = df_articles.iloc[best_hit['corpus_id']]['URL']
-                    results.append({
-                        'Słowo kluczowe': keyword,
-                        'Wolumen': volume,
-                        'Status': 'Już istnieje',
-                        'Akcja / Dopasowany URL': matched_article_url,
-                        'Podobieństwo': round(best_hit['score'], 2)
-                    })
+                    results.append({'Słowo kluczowe': keyword, 'Wolumen': volume, 'Status': 'Już istnieje', 'Akcja / Dopasowany URL': matched_article_url, 'Podobieństwo': round(best_hit['score'], 2)})
                 else:
-                    results.append({
-                        'Słowo kluczowe': keyword,
-                        'Wolumen': volume,
-                        'Status': 'Nowy temat',
-                        'Akcja / Dopasowany URL': 'Stwórz nowy artykuł',
-                        'Podobieństwo': round(best_hit['score'], 2)
-                    })
+                    results.append({'Słowo kluczowe': keyword, 'Wolumen': volume, 'Status': 'Nowy temat', 'Akcja / Dopasowany URL': 'Stwórz nowy artykuł', 'Podobieństwo': round(best_hit['score'], 2)})
             
             df_results = pd.DataFrame(results)
             
-            # 4. Generowanie tytułów dla nowych tematów
             df_new_topics = df_results[df_results['Status'] == 'Nowy temat'].copy()
             
             if not df_new_topics.empty:
-                st.info(f"Znaleziono {len(df_new_topics)} nowych tematów. Rozpoczynam generowanie propozycji tytułów...")
+                df_new_topics_sorted = df_new_topics.sort_values(by='Wolumen', ascending=False)
+                df_to_process = df_new_topics_sorted.head(num_to_generate)
                 
-                original_new_topics_data = df_gap[df_gap['Keyword'].isin(df_new_topics['Słowo kluczowe'])]
-                df_new_topics['Competitor URL'] = original_new_topics_data.apply(find_first_competitor_url, axis=1).values
+                st.info(f"Znaleziono {len(df_new_topics)} nowych tematów. Rozpoczynam generowanie propozycji dla {len(df_to_process)} najważniejszych z nich...")
+                
+                original_data_for_processing = df_gap[df_gap['Keyword'].isin(df_to_process['Słowo kluczowe'])]
+                df_to_process['Competitor URL'] = original_data_for_processing.apply(find_first_competitor_url, axis=1).values
                 
                 progress_bar = st.progress(0, text="Generowanie tytułów...")
-                total_topics = len(df_new_topics)
+                total_to_process = len(df_to_process)
                 
                 generated_titles = []
-                for i, (_, row) in enumerate(df_new_topics.iterrows()):
+                for i, (_, row) in enumerate(df_to_process.iterrows()):
                     titles = generate_titles(openai_api_key, row['Słowo kluczowe'], row['Wolumen'], row['Competitor URL'])
                     generated_titles.append(titles)
-                    progress_bar.progress((i + 1) / total_topics, text=f"Generowanie tytułów... ({i+1}/{total_topics})")
+                    progress_bar.progress((i + 1) / total_to_process, text=f"Generowanie tytułów... ({i+1}/{total_to_process})")
 
-                df_titles = pd.DataFrame(generated_titles, columns=['Propozycja tematu 1', 'Propozycja tematu 2', 'Propozycja tematu 3'], index=df_new_topics.index)
-                
+                df_titles = pd.DataFrame(generated_titles, columns=['Propozycja tematu 1', 'Propozycja tematu 2', 'Propozycja tematu 3'], index=df_to_process.index)
                 df_results = df_results.join(df_titles)
             
             df_results.fillna('-', inplace=True)
             st.success("Analiza zakończona!")
 
-            # 5. Wyświetlanie wyników
             st.header("Wyniki Analizy i Plan Treści")
             
             df_results_sorted = df_results.sort_values(by=['Status', 'Wolumen'], ascending=[True, False])
-            
             st.dataframe(df_results_sorted)
             
             csv_buffer = io.StringIO()
