@@ -14,7 +14,6 @@ st.set_page_config(page_title="Planer Treści SEO", layout="wide")
 @st.cache_resource
 def load_model():
     """Ładuje i cachuje model SentenceTransformer."""
-    # ZMIANA MODELU NA DOKŁADNIEJSZY
     return SentenceTransformer('paraphrase-multilingual-mpnet-base-v2')
 
 def find_first_competitor_url(row):
@@ -55,8 +54,7 @@ def generate_titles(api_key, keyword, volume, competitor_url):
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,
-            # POPRAWKA: Zmiana nazwy parametru z max_tokens na max_completion_tokens
-            max_tokens=150
+            max_tokens=200  # Zwiększono na wypadek dłuższych tytułów
         )
         
         content = response.choices[0].message.content
@@ -129,7 +127,7 @@ if st.button("Uruchom Analizę", type="primary"):
             results = []
             for i, row in df_gap.iterrows():
                 keyword = row['Keyword']
-                volume = row['Volume']
+                volume = row.get('Volume', 0)
                 best_hit = hits[i][0]
                 
                 if best_hit['score'] > similarity_threshold:
@@ -158,20 +156,23 @@ if st.button("Uruchom Analizę", type="primary"):
                 progress_bar = st.progress(0, text="Generowanie tytułów (GPT-4)...")
                 total_to_process = len(df_to_process)
                 
-                generated_titles = []
+                generated_titles_list = []
+                keywords_for_titles = []
                 for i, (_, row) in enumerate(df_to_process.iterrows()):
-                    titles = generate_titles(openai_api_key, row['Słowo kluczowe'], row['Wolumen'], row['Competitor URL'])
-                    generated_titles.append(titles)
+                    titles = generate_titles(openai_api_key, row['Słowo kluczowe'], row['Wolumen'], row.get('Competitor URL', 'Brak'))
+                    generated_titles_list.append(titles)
+                    keywords_for_titles.append(row['Słowo kluczowe'])
                     progress_bar.progress((i + 1) / total_to_process, text=f"Generowanie tytułów (GPT-4)... ({i+1}/{total_to_process})")
 
-                df_titles = pd.DataFrame(generated_titles, columns=['Propozycja tematu 1', 'Propozycja tematu 2', 'Propozycja tematu 3'], index=df_to_process.index)
-                
-                df_to_process_with_titles = pd.concat([df_to_process.reset_index(drop=True), df_titles.reset_index(drop=True)], axis=1)
-                
-                df_results_indexed = df_results.set_index('Słowo kluczowe')
-                df_titles_indexed = df_to_process_with_titles.set_index('Słowo kluczowe')[['Propozycja tematu 1', 'Propozycja tematu 2', 'Propozycja tematu 3']]
-                df_results_indexed.update(df_titles_indexed)
-                df_results = df_results_indexed.reset_index()
+                # POPRAWIONA LOGIKA DOŁĄCZANIA DANYCH
+                df_titles = pd.DataFrame({
+                    'Słowo kluczowe': keywords_for_titles,
+                    'Propozycja tematu 1': [titles[0] for titles in generated_titles_list],
+                    'Propozycja tematu 2': [titles[1] for titles in generated_titles_list],
+                    'Propozycja tematu 3': [titles[2] for titles in generated_titles_list]
+                })
+
+                df_results = pd.merge(df_results, df_titles, on='Słowo kluczowe', how='left')
 
             df_results.fillna('-', inplace=True)
             st.success("Analiza zakończona!")
@@ -179,11 +180,20 @@ if st.button("Uruchom Analizę", type="primary"):
             st.header("Wyniki Analizy i Plan Treści")
             
             df_results_sorted = df_results.sort_values(by=['Status', 'Wolumen'], ascending=[True, False])
-            st.dataframe(df_results_sorted)
             
+            # Poprawiona kolejność kolumn dla czytelności
+            cols_order = [
+                'Słowo kluczowe', 'Wolumen', 'Status', 'Akcja / Dopasowany URL', 
+                'Propozycja tematu 1', 'Propozycja tematu 2', 'Propozycja tematu 3', 'Podobieństwo'
+            ]
+            # Upewniamy się, że wszystkie kolumny istnieją przed zmianą kolejności
+            existing_cols = [col for col in cols_order if col in df_results_sorted.columns]
+            st.dataframe(df_results_sorted[existing_cols])
+            
+            # Konwersja do CSV do pobrania
             csv_buffer = io.StringIO()
-            df_results_sorted.to_csv(csv_buffer, index=False, encoding='utf-8')
-            csv_bytes = csv_buffer.getvalue().encode('utf-8')
+            df_results_sorted[existing_cols].to_csv(csv_buffer, index=False, encoding='utf-8')
+            csv_bytes = csv_buffer.getvalue().encode('utf-8-sig') # Użycie 'utf-8-sig' dla lepszej kompatybilności z Excelem
 
             st.download_button(
                 label="Pobierz gotowy plan treści jako CSV",
