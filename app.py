@@ -50,7 +50,7 @@ def generate_titles(api_key, keyword, volume, competitor_url):
         
         response = client.chat.completions.create(
             # ZMIANA MODELU NA GPT-4 TURBO
-            model="gpt-4o",
+            model="gpt-5",
             messages=[
                 {"role": "system", "content": "Jesteś ekspertem SEO i copywriterem."},
                 {"role": "user", "content": prompt}
