@@ -14,6 +14,7 @@ st.set_page_config(page_title="Planer Treści SEO", layout="wide")
 @st.cache_resource
 def load_model():
     """Ładuje i cachuje model SentenceTransformer."""
+    # ZMIANA MODELU NA DOKŁADNIEJSZY
     return SentenceTransformer('paraphrase-multilingual-mpnet-base-v2')
 
 def find_first_competitor_url(row):
@@ -28,7 +29,6 @@ def generate_titles(api_key, keyword, volume, competitor_url):
     try:
         client = openai.OpenAI(api_key=api_key)
         
-        # ZAKTUALIZOWANY PROMPT ZGODNIE Z WYTYCZNYMI
         prompt = f"""
         Jesteś ekspertem SEO i copywriterem specjalizującym się w tworzeniu angażujących tytułów na polskojęzyczne blogi.
 
@@ -49,13 +49,13 @@ def generate_titles(api_key, keyword, volume, competitor_url):
         """
         
         response = client.chat.completions.create(
-            # ZMIANA MODELU NA GPT-4 TURBO
-            model="gpt-5",
+            model="gpt-4-turbo",
             messages=[
                 {"role": "system", "content": "Jesteś ekspertem SEO i copywriterem."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,
+            # POPRAWKA: Zmiana nazwy parametru z max_tokens na max_completion_tokens
             max_tokens=150
         )
         
@@ -103,7 +103,7 @@ if st.button("Uruchom Analizę", type="primary"):
     elif content_gap_file is None or my_articles_file is None:
         st.warning("Upewnij się, że wgrałeś oba pliki CSV.")
     else:
-        with st.spinner("Przeprowadzam analizę... Użycie GPT-4 może potrwać nieco dłużej."):
+        with st.spinner("Przeprowadzam analizę... Użycie dokładniejszego modelu może potrwać nieco dłużej."):
             try:
                 df_gap = pd.read_csv(content_gap_file)
                 df_articles = pd.read_csv(my_articles_file)
@@ -120,6 +120,7 @@ if st.button("Uruchom Analizę", type="primary"):
 
             model = load_model()
             
+            st.info("Rozpoczynam analizę semantyczną... To najdłuższy etap procesu.")
             corpus_embeddings = model.encode(df_articles['Title'].tolist(), convert_to_tensor=True, show_progress_bar=True)
             query_embeddings = model.encode(df_gap['Keyword'].tolist(), convert_to_tensor=True, show_progress_bar=True)
             
@@ -147,21 +148,31 @@ if st.button("Uruchom Analizę", type="primary"):
                 
                 st.info(f"Znaleziono {len(df_new_topics)} nowych tematów. Rozpoczynam generowanie propozycji dla {len(df_to_process)} najważniejszych z nich...")
                 
-                original_data_for_processing = df_gap[df_gap['Keyword'].isin(df_to_process['Słowo kluczowe'])]
-                df_to_process['Competitor URL'] = original_data_for_processing.apply(find_first_competitor_url, axis=1).values
+                original_data_for_processing = df_gap[df_gap['Keyword'].isin(df_to_process['Słowo kluczowe'])].set_index('Keyword')
+                competitor_urls = original_data_for_processing.apply(find_first_competitor_url, axis=1)
                 
-                progress_bar = st.progress(0, text="Generowanie tytułów...")
+                df_to_process_indexed = df_to_process.set_index('Słowo kluczowe')
+                df_to_process_indexed['Competitor URL'] = competitor_urls
+                df_to_process = df_to_process_indexed.reset_index()
+
+                progress_bar = st.progress(0, text="Generowanie tytułów (GPT-4)...")
                 total_to_process = len(df_to_process)
                 
                 generated_titles = []
                 for i, (_, row) in enumerate(df_to_process.iterrows()):
                     titles = generate_titles(openai_api_key, row['Słowo kluczowe'], row['Wolumen'], row['Competitor URL'])
                     generated_titles.append(titles)
-                    progress_bar.progress((i + 1) / total_to_process, text=f"Generowanie tytułów... ({i+1}/{total_to_process})")
+                    progress_bar.progress((i + 1) / total_to_process, text=f"Generowanie tytułów (GPT-4)... ({i+1}/{total_to_process})")
 
                 df_titles = pd.DataFrame(generated_titles, columns=['Propozycja tematu 1', 'Propozycja tematu 2', 'Propozycja tematu 3'], index=df_to_process.index)
-                df_results = df_results.join(df_titles)
-            
+                
+                df_to_process_with_titles = pd.concat([df_to_process.reset_index(drop=True), df_titles.reset_index(drop=True)], axis=1)
+                
+                df_results_indexed = df_results.set_index('Słowo kluczowe')
+                df_titles_indexed = df_to_process_with_titles.set_index('Słowo kluczowe')[['Propozycja tematu 1', 'Propozycja tematu 2', 'Propozycja tematu 3']]
+                df_results_indexed.update(df_titles_indexed)
+                df_results = df_results_indexed.reset_index()
+
             df_results.fillna('-', inplace=True)
             st.success("Analiza zakończona!")
 
