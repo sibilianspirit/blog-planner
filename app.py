@@ -14,7 +14,7 @@ st.set_page_config(page_title="Planer Treści SEO", layout="wide")
 @st.cache_resource
 def load_model():
     """Ładuje i cachuje model SentenceTransformer."""
-    return SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+    return SentenceTransformer('paraphrase-multilingual-mpnet-base-v2')
 
 def find_first_competitor_url(row):
     """Znajduje pierwszy dostępny URL konkurenta w danym wierszu."""
