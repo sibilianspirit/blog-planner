@@ -11,25 +11,22 @@ st.set_page_config(page_title="Planer Treści SEO", layout="wide")
 
 # --- Funkcje pomocnicze ---
 
-# Dodajemy cache'owanie, aby nie generować tych samych wektorów wielokrotnie, oszczędzając API
 @st.cache_data(show_spinner=False)
 def get_openai_embeddings(_texts, api_key):
     """Generuje wektory (embeddings) za pomocą API OpenAI, czyszcząc dane wejściowe."""
     client = openai.OpenAI(api_key=api_key)
     
-    # --- KLUCZOWA POPRAWKA: Zabezpieczenie przed pustymi danymi ---
-    # Model OpenAI nie akceptuje pustych stringów ani NaN. Zamieniamy je na spację,
-    # aby zachować spójność indeksów listy, co jest krytyczne dla dalszego działania.
     clean_texts = [str(text).strip() if pd.notna(text) and str(text).strip() else " " for text in _texts]
 
     try:
         response = client.embeddings.create(
             input=clean_texts,
+            # ZMIANA MODELU EMBEDDINGOWEGO NA NAJLEPSZY
             model="text-embedding-3-large"
         )
         return [item.embedding for item in response.data]
     except Exception as e:
-        st.error(f"Błąd podczas generowania wektorów OpenAI: {e}. Sprawdź, czy Twoje pliki CSV nie zawierają pustych wierszy w kolumnach 'Keyword' lub 'Title'.")
+        st.error(f"Błąd podczas generowania wektorów OpenAI: {e}. Sprawdź, czy Twoje pliki CSV nie zawierają pustych wierszy.")
         return None
 
 def find_first_competitor_url(row):
@@ -63,12 +60,14 @@ def generate_titles(api_key, keyword, volume, competitor_url):
         """
         
         response = client.chat.completions.create(
-            model="gpt-5",
+            # ZMIANA MODELU CHATU NA NAJLEPSZY DOSTĘPNY
+            model="gpt-4-turbo",
             messages=[
                 {"role": "system", "content": "Jesteś ekspertem SEO i copywriterem."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,
+            # POPRAWKA NAZW PARAMETRU DLA NOWYCH MODELI
             max_tokens=200
         )
         
@@ -84,8 +83,8 @@ def generate_titles(api_key, keyword, volume, competitor_url):
 
 # --- Interfejs Użytkownika (UI) ---
 
-st.title("🚀 Planer Treści SEO [Wersja Hybrydowa v2]")
-st.markdown("Ulepszona wersja aplikacji, która wykorzystuje Twoje aktualne rankingi oraz zaawansowane modele OpenAI do precyzyjnego planowania treści.")
+st.title("🚀 Planer Treści SEO [Wersja Hybrydowa v3 - PRO]")
+st.markdown("Najnowsza wersja z precyzyjnym mapowaniem rankingów i zaawansowanymi modelami AI od OpenAI.")
 
 col1, col2 = st.columns(2)
 
@@ -121,7 +120,6 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 df_articles = pd.read_csv(my_articles_file)
                 df_ranking = pd.read_csv(ranking_file)
                 
-                # Rygorystyczne czyszczenie danych
                 df_articles.rename(columns={'Address': 'URL', 'Title 1': 'Title'}, inplace=True)
                 df_articles.dropna(subset=['Title', 'URL'], inplace=True)
                 df_articles = df_articles[df_articles['Title'].str.strip() != '']
@@ -138,7 +136,6 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 st.error(f"Błąd podczas wczytywania plików CSV: {e}")
                 st.stop()
 
-            # Krok 1: Twarde mapowanie na podstawie rankingu
             ranking_keywords = set(df_ranking['Słowo kluczowe'].str.lower())
             ranking_map = df_ranking.set_index(df_ranking['Słowo kluczowe'].str.lower())['Adres URL'].to_dict()
             
@@ -148,49 +145,51 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
             for _, row in df_gap.iterrows():
                 keyword_lower = str(row['Keyword']).lower()
                 if keyword_lower in ranking_keywords:
-                    results.append({
-                        'Słowo kluczowe': row['Keyword'], 'Wolumen': row.get('Volume', 0), 
-                        'Status': 'Już istnieje', 'Akcja / Dopasowany URL': ranking_map[keyword_lower], 'Podobieństwo': 1.00
-                    })
+                    results.append({'Słowo kluczowe': row['Keyword'], 'Wolumen': row.get('Volume', 0), 'Status': 'Już istnieje', 'Akcja / Dopasowany URL': ranking_map[keyword_lower], 'Podobieństwo': 1.00})
                 else:
                     keywords_for_semantic_check.append(row.to_dict())
 
-            st.info(f"{len(results)} słów kluczowych zostało zmapowanych na podstawie rankingu. Pozostało {len(keywords_for_semantic_check)} do analizy semantycznej.")
+            st.info(f"{len(results)} słów kluczowych zmapowano na podstawie rankingu. Pozostało {len(keywords_for_semantic_check)} do analizy semantycznej.")
 
-            # Krok 2: Analiza semantyczna dla pozostałych
             if keywords_for_semantic_check:
                 df_semantic = pd.DataFrame(keywords_for_semantic_check)
-                
                 article_titles = df_articles['Title'].tolist()
                 semantic_keywords = df_semantic['Keyword'].tolist()
 
-                st.info("Generowanie wektorów (embeddings) przez API OpenAI...")
+                st.info("Generowanie wektorów (embeddings) przez API OpenAI (text-embedding-3-large)...")
                 corpus_embeddings_openai = get_openai_embeddings(article_titles, openai_api_key)
                 query_embeddings_openai = get_openai_embeddings(semantic_keywords, openai_api_key)
 
-                if corpus_embeddings_openai is not None and query_embeddings_openai is not None:
+                if corpus_embeddings_openai and query_embeddings_openai:
                     corpus_tensor = torch.tensor(corpus_embeddings_openai)
                     query_tensor = torch.tensor(query_embeddings_openai)
                     
                     hits = util.semantic_search(query_tensor, corpus_tensor, top_k=1)
                     
                     for i, row_dict in enumerate(df_semantic.to_dict('records')):
-                        best_hit = hits[i][0]
-                        if best_hit['score'] > similarity_threshold:
-                            matched_article_url = df_articles.iloc[best_hit['corpus_id']]['URL']
-                            results.append({
-                                'Słowo kluczowe': row_dict['Keyword'], 'Wolumen': row_dict.get('Volume', 0),
-                                'Status': 'Do optymalizacji', 'Akcja / Dopasowany URL': matched_article_url, 'Podobieństwo': round(best_hit['score'], 2)
-                            })
-                        else:
-                            results.append({
-                                'Słowo kluczowe': row_dict['Keyword'], 'Wolumen': row_dict.get('Volume', 0),
-                                'Status': 'Nowy temat', 'Akcja / Dopasowany URL': 'Stwórz nowy artykuł', 'Podobieństwo': round(best_hit['score'], 2)
-                            })
+                        # --- KLUCZOWA POPRAWKA BŁĘDU INDEXERROR ---
+                        if hits[i]: # Sprawdź, czy lista wyników nie jest pusta
+                            best_hit = hits[i][0]
+                            if best_hit['score'] > similarity_threshold:
+                                matched_article_url = df_articles.iloc[best_hit['corpus_id']]['URL']
+                                status = 'Do optymalizacji'
+                                score = round(best_hit['score'], 2)
+                            else:
+                                matched_article_url = 'Stwórz nowy artykuł'
+                                status = 'Nowy temat'
+                                score = round(best_hit['score'], 2)
+                        else: # Jeśli nie ma żadnych trafień semantycznych
+                            matched_article_url = 'Stwórz nowy artykuł'
+                            status = 'Nowy temat'
+                            score = 0.0
+
+                        results.append({
+                            'Słowo kluczowe': row_dict['Keyword'], 'Wolumen': row_dict.get('Volume', 0),
+                            'Status': status, 'Akcja / Dopasowany URL': matched_article_url, 'Podobieństwo': score
+                        })
 
             df_results = pd.DataFrame(results)
             
-            # Krok 3: Generowanie tytułów dla "Nowych tematów"
             df_new_topics = df_results[df_results['Status'] == 'Nowy temat'].copy()
             
             if not df_new_topics.empty:
