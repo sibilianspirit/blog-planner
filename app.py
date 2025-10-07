@@ -60,6 +60,12 @@ def cluster_keywords(keywords_df, embeddings, cluster_threshold=0.85):
     if len(keywords_df) == 0:
         return keywords_df
     
+    # Upewniamy się, że kolumna Wolumen istnieje
+    if 'Volume' not in keywords_df.columns and 'Wolumen' not in keywords_df.columns:
+        keywords_df['Wolumen'] = 0
+    elif 'Volume' in keywords_df.columns and 'Wolumen' not in keywords_df.columns:
+        keywords_df['Wolumen'] = keywords_df['Volume']
+    
     # Konwersja do numpy array
     embeddings_array = np.array(embeddings)
     
@@ -84,11 +90,13 @@ def cluster_keywords(keywords_df, embeddings, cluster_threshold=0.85):
     
     # Wyznaczenie HEAD keyword dla każdego klastra (najwyższy wolumen)
     def get_head_keyword(group):
-        head_idx = group['Wolumen'].idxmax()
-        group['HEAD_Keyword'] = group.loc[head_idx, 'Słowo kluczowe']
-        group['Typ_w_klastrze'] = 'RELATED'
-        group.loc[head_idx, 'Typ_w_klastrze'] = 'HEAD'
-        group['Liczba_fraz_w_klastrze'] = len(group)
+        if 'Wolumen' in group.columns and len(group) > 0:
+            head_idx = group['Wolumen'].idxmax()
+            keyword_col = 'Keyword' if 'Keyword' in group.columns else 'Słowo kluczowe'
+            group['HEAD_Keyword'] = group.loc[head_idx, keyword_col]
+            group['Typ_w_klastrze'] = 'RELATED'
+            group.loc[head_idx, 'Typ_w_klastrze'] = 'HEAD'
+            group['Liczba_fraz_w_klastrze'] = len(group)
         return group
     
     keywords_df = keywords_df.groupby('Klaster_ID', group_keys=False).apply(get_head_keyword)
@@ -316,6 +324,16 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         if keywords_for_semantic_check:
             df_semantic = pd.DataFrame(keywords_for_semantic_check)
             
+            # Upewniamy się, że kolumna Wolumen istnieje
+            if 'Volume' in df_semantic.columns and 'Wolumen' not in df_semantic.columns:
+                df_semantic['Wolumen'] = df_semantic['Volume']
+            elif 'Wolumen' not in df_semantic.columns:
+                df_semantic['Wolumen'] = 0
+            
+            # Dodajemy kolumnę Słowo kluczowe jeśli jest Keyword
+            if 'Keyword' in df_semantic.columns and 'Słowo kluczowe' not in df_semantic.columns:
+                df_semantic['Słowo kluczowe'] = df_semantic['Keyword']
+            
             embedding_progress_placeholder = st.empty()
             
             # Generowanie embeddingów
@@ -349,6 +367,10 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 score, corpus_idx = top_result.values[0].item(), top_result.indices[0].item()
                 closest_article_url = df_articles.iloc[corpus_idx]['URL']
                 closest_article_title = df_articles.iloc[corpus_idx]['Title']
+                
+                # Pobieramy słowo kluczowe z odpowiedniej kolumny
+                keyword = row_dict.get('Keyword', row_dict.get('Słowo kluczowe', ''))
+                volume = row_dict.get('Volume', row_dict.get('Wolumen', 0))
 
                 if score > similarity_threshold:
                     status = f'Do optymalizacji (Podobne do: {closest_article_title[:50]}...)'
@@ -358,11 +380,11 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                     url = 'Stwórz nowy artykuł'
                 
                 # Wykrywanie intencji
-                intent = detect_search_intent(row_dict['Keyword'])
+                intent = detect_search_intent(keyword)
                 
                 result = {
-                    'Słowo kluczowe': row_dict['Keyword'],
-                    'Wolumen': row_dict.get('Volume', 0),
+                    'Słowo kluczowe': keyword,
+                    'Wolumen': volume,
                     'Status': status,
                     'Akcja / Dopasowany URL': url,
                     'Najbliższy_artykuł': closest_article_url,
