@@ -16,7 +16,7 @@ st.set_page_config(page_title="Planer Treści SEO", layout="wide")
 # --- Funkcje pomocnicze ---
 
 @st.cache_data(show_spinner=False)
-def get_openai_embeddings(texts_tuple, api_key, batch_size=256, _progress_bar_placeholder=None):
+def get_openai_embeddings(texts_tuple, api_key, batch_size=256):
     """
     Generuje wektory (embeddings) za pomocą API OpenAI, używając batchingu
     dla obsługi dużych list i uniknięcia błędów API.
@@ -29,9 +29,6 @@ def get_openai_embeddings(texts_tuple, api_key, batch_size=256, _progress_bar_pl
 
     num_batches = math.ceil(len(clean_texts) / batch_size)
     
-    if _progress_bar_placeholder:
-        progress_bar = _progress_bar_placeholder.progress(0, text=f"Generowanie wektorów... (Batch 0/{num_batches})")
-    
     for i in range(num_batches):
         start_index = i * batch_size
         end_index = start_index + batch_size
@@ -40,10 +37,6 @@ def get_openai_embeddings(texts_tuple, api_key, batch_size=256, _progress_bar_pl
         try:
             response = client.embeddings.create(input=batch, model="text-embedding-3-large")
             all_embeddings.extend([item.embedding for item in response.data])
-            
-            if _progress_bar_placeholder:
-                progress_bar.progress((i + 1) / num_batches, text=f"Generowanie wektorów... (Batch {i+1}/{num_batches})")
-            
             time.sleep(1)
 
         except Exception as e:
@@ -334,20 +327,20 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
             if 'Keyword' in df_semantic.columns and 'Słowo kluczowe' not in df_semantic.columns:
                 df_semantic['Słowo kluczowe'] = df_semantic['Keyword']
             
-            embedding_progress_placeholder = st.empty()
+            st.info("🔄 Generowanie embeddingów dla artykułów...")
             
             # Generowanie embeddingów
             corpus_embeddings = get_openai_embeddings(
                 tuple(df_articles['Title'].tolist()),
-                openai_api_key,
-                _progress_bar_placeholder=embedding_progress_placeholder
+                openai_api_key
             )
+            
+            st.info("🔄 Generowanie embeddingów dla słów kluczowych...")
+            
             query_embeddings = get_openai_embeddings(
-                tuple(df_semantic['Keyword'].tolist()),
-                openai_api_key,
-                _progress_bar_placeholder=embedding_progress_placeholder
+                tuple(df_semantic['Keyword' if 'Keyword' in df_semantic.columns else 'Słowo kluczowe'].tolist()),
+                openai_api_key
             )
-            embedding_progress_placeholder.empty()
 
             if not corpus_embeddings or not query_embeddings:
                 st.error("Nie udało się wygenerować wektorów. Sprawdź klucz API i spróbuj ponownie.")
