@@ -15,18 +15,16 @@ st.set_page_config(page_title="Planer Treści SEO", layout="wide")
 def get_openai_embeddings(_texts, api_key):
     """Generuje wektory (embeddings) za pomocą API OpenAI, czyszcząc dane wejściowe."""
     client = openai.OpenAI(api_key=api_key)
-    
     clean_texts = [str(text).strip() if pd.notna(text) and str(text).strip() else " " for text in _texts]
 
     try:
         response = client.embeddings.create(
             input=clean_texts,
-            # ZMIANA MODELU EMBEDDINGOWEGO NA NAJLEPSZY
-            model="text-embedding-3-large"
+            model="text-embedding-3-large"  # ZMIANA MODELU EMBEDDINGOWEGO
         )
         return [item.embedding for item in response.data]
     except Exception as e:
-        st.error(f"Błąd podczas generowania wektorów OpenAI: {e}. Sprawdź, czy Twoje pliki CSV nie zawierają pustych wierszy.")
+        st.error(f"Błąd podczas generowania wektorów OpenAI: {e}")
         return None
 
 def find_first_competitor_url(row):
@@ -55,20 +53,18 @@ def generate_titles(api_key, keyword, volume, competitor_url):
         1. Każdy tytuł musi zawierać dokładną frazę kluczową: "{keyword}".
         2. Tytuły muszą mieć charakter informacyjny lub poradnikowy (np. "Jak...", "Co to jest...", "Przewodnik po...").
         3. Stosuj polskie zasady pisowni – tylko pierwsza litera w tytule wielka (reszta małymi, chyba że to nazwa własna).
-        4. Zamiast dwukropka używaj myślnika (np. "Tytuł – podtytuł").
+        4. Zamiast dwukropka używaj myślnika (np. "Tytuł – podtykuł").
         5. Zwróć odpowiedź wyłącznie w formie listy numerowanej (1. Tytuł, 2. Tytuł, 3. Tytuł), bez żadnych dodatkowych wstępów ani wyjaśnień.
         """
         
         response = client.chat.completions.create(
-            # ZMIANA MODELU CHATU NA NAJLEPSZY DOSTĘPNY
-            model="gpt-4-turbo",
+            model="gpt-4-turbo", # ZMIANA MODELU CHATU NA NAJLEPSZY DOSTĘPNY
             messages=[
                 {"role": "system", "content": "Jesteś ekspertem SEO i copywriterem."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.7,
-            # POPRAWKA NAZW PARAMETRU DLA NOWYCH MODELI
-            max_tokens=200
+            temperature=0.7
+            # Usunięto parametr max_tokens dla maksymalnej kompatybilności
         )
         
         content = response.choices[0].message.content
@@ -82,22 +78,15 @@ def generate_titles(api_key, keyword, volume, competitor_url):
         return ["Błąd API", "Błąd API", "Błąd API"]
 
 # --- Interfejs Użytkownika (UI) ---
-
-st.title("🚀 Planer Treści SEO [Wersja Hybrydowa v3 - PRO]")
+st.title("🚀 Planer Treści SEO [Wersja Hybrydowa v4 - PRO]")
 st.markdown("Najnowsza wersja z precyzyjnym mapowaniem rankingów i zaawansowanymi modelami AI od OpenAI.")
 
 col1, col2 = st.columns(2)
 
 with col1:
     st.header("1. Konfiguracja")
-    num_to_generate = st.number_input(
-        "Liczba nowych artykułów do wygenerowania", min_value=1, value=20,
-        help="Określ, dla ilu najważniejszych słów kluczowych chcesz wygenerować propozycje tytułów."
-    )
-    similarity_threshold = st.slider(
-        "Próg podobieństwa dla optymalizacji", min_value=0.7, max_value=1.0, value=0.8, step=0.01,
-        help="Próg, powyżej którego artykuł zostanie uznany za 'Do optymalizacji' (domyślnie: 0.80)"
-    )
+    num_to_generate = st.number_input("Liczba nowych artykułów do wygenerowania", min_value=1, value=20, help="Określ, dla ilu najważniejszych słów kluczowych chcesz wygenerować propozycje tytułów.")
+    similarity_threshold = st.slider("Próg podobieństwa dla optymalizacji", min_value=0.7, max_value=1.0, value=0.8, step=0.01, help="Próg, powyżej którego artykuł zostanie uznany za 'Do optymalizacji' (domyślnie: 0.80)")
 
 with col2:
     st.header("2. Wgraj pliki CSV")
@@ -106,17 +95,17 @@ with col2:
     ranking_file = st.file_uploader("3. Wgraj plik CSV z aktualnym rankingiem", type="csv")
 
 # --- Logika Aplikacji ---
-
 if st.button("Uruchom Analizę Hybrydową", type="primary"):
     openai_api_key = st.secrets.get("OPENAI_API_KEY")
     if not openai_api_key:
-        st.error("Klucz API OpenAI nie został znaleziony w sekretach Streamlit! Upewnij się, że dodałeś go w ustawieniach aplikacji.")
+        st.error("Klucz API OpenAI nie został znaleziony w sekretach Streamlit!")
     elif not all([content_gap_file, my_articles_file, ranking_file]):
         st.warning("Upewnij się, że wgrałeś wszystkie trzy pliki CSV.")
     else:
         with st.spinner("Przeprowadzam analizę... To może potrwać kilka minut."):
             try:
-                df_gap = pd.read_csv(content_gap_file)
+                # Wczytywanie i rygorystyczne czyszczenie danych
+                df_gap = pd.read_csv(content_gap_file).dropna(subset=['Keyword']).astype({'Keyword': str})
                 df_articles = pd.read_csv(my_articles_file)
                 df_ranking = pd.read_csv(ranking_file)
                 
@@ -124,18 +113,14 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 df_articles.dropna(subset=['Title', 'URL'], inplace=True)
                 df_articles = df_articles[df_articles['Title'].str.strip() != '']
                 df_articles = df_articles[~df_articles['Title'].str.contains("Bot Verification|Strona|Kategoria", na=False, case=False)]
-
                 df_ranking.dropna(subset=['Słowo kluczowe', 'Adres URL'], inplace=True)
-                df_ranking = df_ranking[df_ranking['Słowo kluczowe'].str.strip() != '']
                 
-                df_gap.dropna(subset=['Keyword'], inplace=True)
-                df_gap = df_gap[df_gap['Keyword'].str.strip() != '']
-
-                st.info(f"Znaleziono {len(df_gap)} słów kluczowych w content gap, {len(df_articles)} artykułów i {len(df_ranking)} rankingowych słów kluczowych.")
+                st.info(f"Wczytano {len(df_gap)} słów kluczowych, {len(df_articles)} artykułów i {len(df_ranking)} rankingowych słów kluczowych.")
             except Exception as e:
                 st.error(f"Błąd podczas wczytywania plików CSV: {e}")
                 st.stop()
 
+            # Krok 1: Mapowanie na podstawie rankingu
             ranking_keywords = set(df_ranking['Słowo kluczowe'].str.lower())
             ranking_map = df_ranking.set_index(df_ranking['Słowo kluczowe'].str.lower())['Adres URL'].to_dict()
             
@@ -149,98 +134,76 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 else:
                     keywords_for_semantic_check.append(row.to_dict())
 
-            st.info(f"{len(results)} słów kluczowych zmapowano na podstawie rankingu. Pozostało {len(keywords_for_semantic_check)} do analizy semantycznej.")
+            st.info(f"{len(results)} słów zmapowano na podstawie rankingu. Pozostało {len(keywords_for_semantic_check)} do analizy semantycznej.")
 
+            # Krok 2: Analiza semantyczna dla pozostałych
             if keywords_for_semantic_check:
                 df_semantic = pd.DataFrame(keywords_for_semantic_check)
-                article_titles = df_articles['Title'].tolist()
-                semantic_keywords = df_semantic['Keyword'].tolist()
-
-                st.info("Generowanie wektorów (embeddings) przez API OpenAI (text-embedding-3-large)...")
-                corpus_embeddings_openai = get_openai_embeddings(article_titles, openai_api_key)
-                query_embeddings_openai = get_openai_embeddings(semantic_keywords, openai_api_key)
+                st.info("Generowanie wektorów przez API OpenAI (text-embedding-3-large)...")
+                
+                corpus_embeddings_openai = get_openai_embeddings(df_articles['Title'].tolist(), openai_api_key)
+                query_embeddings_openai = get_openai_embeddings(df_semantic['Keyword'].tolist(), openai_api_key)
 
                 if corpus_embeddings_openai and query_embeddings_openai:
                     corpus_tensor = torch.tensor(corpus_embeddings_openai)
                     query_tensor = torch.tensor(query_embeddings_openai)
-                    
                     hits = util.semantic_search(query_tensor, corpus_tensor, top_k=1)
                     
-                    for i, row_dict in enumerate(df_semantic.to_dict('records')):
-                        # --- KLUCZOWA POPRAWKA BŁĘDU INDEXERROR ---
-                        if hits[i]: # Sprawdź, czy lista wyników nie jest pusta
-                            best_hit = hits[i][0]
+                    # --- POPRAWIONA I BEZPIECZNA PĘTLA ---
+                    semantic_records = df_semantic.to_dict('records')
+                    for row_dict, hit_list in zip(semantic_records, hits):
+                        if hit_list:
+                            best_hit = hit_list[0]
                             if best_hit['score'] > similarity_threshold:
-                                matched_article_url = df_articles.iloc[best_hit['corpus_id']]['URL']
                                 status = 'Do optymalizacji'
+                                url = df_articles.iloc[best_hit['corpus_id']]['URL']
                                 score = round(best_hit['score'], 2)
                             else:
-                                matched_article_url = 'Stwórz nowy artykuł'
                                 status = 'Nowy temat'
+                                url = 'Stwórz nowy artykuł'
                                 score = round(best_hit['score'], 2)
-                        else: # Jeśli nie ma żadnych trafień semantycznych
-                            matched_article_url = 'Stwórz nowy artykuł'
+                        else:
                             status = 'Nowy temat'
+                            url = 'Stwórz nowy artykuł'
                             score = 0.0
 
-                        results.append({
-                            'Słowo kluczowe': row_dict['Keyword'], 'Wolumen': row_dict.get('Volume', 0),
-                            'Status': status, 'Akcja / Dopasowany URL': matched_article_url, 'Podobieństwo': score
-                        })
-
+                        results.append({'Słowo kluczowe': row_dict['Keyword'], 'Wolumen': row_dict.get('Volume', 0), 'Status': status, 'Akcja / Dopasowany URL': url, 'Podobieństwo': score})
+            
             df_results = pd.DataFrame(results)
             
+            # Krok 3: Generowanie tytułów
             df_new_topics = df_results[df_results['Status'] == 'Nowy temat'].copy()
-            
             if not df_new_topics.empty:
-                df_new_topics_sorted = df_new_topics.sort_values(by='Wolumen', ascending=False)
-                df_to_process = df_new_topics_sorted.head(num_to_generate)
+                df_to_process = df_new_topics.sort_values(by='Wolumen', ascending=False).head(num_to_generate)
+                st.info(f"Generuję propozycje tytułów dla {len(df_to_process)} najważniejszych nowych tematów...")
                 
-                st.info(f"Znaleziono {len(df_new_topics)} nowych tematów. Generuję propozycje dla {len(df_to_process)} najważniejszych...")
-                
-                original_data_for_processing = df_gap[df_gap['Keyword'].isin(df_to_process['Słowo kluczowe'])].set_index('Keyword')
-                competitor_urls = original_data_for_processing.apply(find_first_competitor_url, axis=1).reindex(df_to_process['Słowo kluczowe']).values
-                
-                df_to_process['Competitor URL'] = competitor_urls
+                original_data = df_gap.set_index('Keyword')
+                urls_to_add = original_data.apply(find_first_competitor_url, axis=1)
+                df_to_process = df_to_process.merge(urls_to_add.rename('Competitor URL'), left_on='Słowo kluczowe', right_index=True, how='left')
 
                 progress_bar = st.progress(0, text="Generowanie tytułów (GPT-4)...")
-                total_to_process = len(df_to_process)
                 
                 generated_titles_list = []
-                keywords_for_titles = []
-                for i, (_, row) in enumerate(df_to_process.iterrows()):
-                    titles = generate_titles(openai_api_key, row['Słowo kluczowe'], row['Wolumen'], row.get('Competitor URL', 'Brak'))
+                for i, row in enumerate(df_to_process.itertuples()):
+                    titles = generate_titles(openai_api_key, row._1, row.Wolumen, row._6)
                     generated_titles_list.append(titles)
-                    keywords_for_titles.append(row['Słowo kluczowe'])
-                    progress_bar.progress((i + 1) / total_to_process, text=f"Generowanie tytułów (GPT-4)... ({i+1}/{total_to_process})")
+                    progress_bar.progress((i + 1) / len(df_to_process), text=f"Generowanie tytułów ({i+1}/{len(df_to_process)})")
 
-                df_titles = pd.DataFrame({
-                    'Słowo kluczowe': keywords_for_titles,
-                    'Propozycja tematu 1': [titles[0] for titles in generated_titles_list],
-                    'Propozycja tematu 2': [titles[1] for titles in generated_titles_list],
-                    'Propozycja tematu 3': [titles[2] for titles in generated_titles_list]
-                })
-
-                df_results = pd.merge(df_results, df_titles, on='Słowo kluczowe', how='left')
+                df_titles = pd.DataFrame(generated_titles_list, columns=['Propozycja tematu 1', 'Propozycja tematu 2', 'Propozycja tematu 3'], index=df_to_process.index)
+                df_results = df_results.merge(df_titles, how='left', left_index=True, right_index=True)
 
             df_results.fillna('-', inplace=True)
             st.success("Analiza zakończona!")
-
             st.header("Wyniki Analizy i Plan Treści")
             
+            cols_order = ['Słowo kluczowe', 'Wolumen', 'Status', 'Akcja / Dopasowany URL', 'Propozycja tematu 1', 'Propozycja tematu 2', 'Propozycja tematu 3', 'Podobieństwo']
+            existing_cols = [col for col in cols_order if col in df_results.columns]
             df_results_sorted = df_results.sort_values(by=['Status', 'Wolumen'], ascending=[True, False])
             
-            cols_order = ['Słowo kluczowe', 'Wolumen', 'Status', 'Akcja / Dopasowany URL', 'Propozycja tematu 1', 'Propozycja tematu 2', 'Propozycja tematu 3', 'Podobieństwo']
-            existing_cols = [col for col in cols_order if col in df_results_sorted.columns]
             st.dataframe(df_results_sorted[existing_cols])
             
             csv_buffer = io.StringIO()
             df_results_sorted[existing_cols].to_csv(csv_buffer, index=False, encoding='utf-8')
             csv_bytes = csv_buffer.getvalue().encode('utf-8-sig')
 
-            st.download_button(
-                label="Pobierz gotowy plan treści jako CSV",
-                data=csv_bytes,
-                file_name="plan_tresci.csv",
-                mime="text/csv",
-            )
+            st.download_button("Pobierz gotowy plan treści jako CSV", csv_bytes, "plan_tresci.csv", "text/csv")
