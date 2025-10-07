@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import openai
-from sentence_transformers import SentenceTransformer, util
+from sentence_transformers import util
 import torch
 import io
 import re
@@ -11,18 +11,25 @@ st.set_page_config(page_title="Planer Treści SEO", layout="wide")
 
 # --- Funkcje pomocnicze ---
 
-@st.cache_resource
-def get_openai_embeddings(texts, api_key):
-    """Generuje wektory (embeddings) za pomocą API OpenAI."""
+# Dodajemy cache'owanie, aby nie generować tych samych wektorów wielokrotnie, oszczędzając API
+@st.cache_data(show_spinner=False)
+def get_openai_embeddings(_texts, api_key):
+    """Generuje wektory (embeddings) za pomocą API OpenAI, czyszcząc dane wejściowe."""
     client = openai.OpenAI(api_key=api_key)
+    
+    # --- KLUCZOWA POPRAWKA: Zabezpieczenie przed pustymi danymi ---
+    # Model OpenAI nie akceptuje pustych stringów ani NaN. Zamieniamy je na spację,
+    # aby zachować spójność indeksów listy, co jest krytyczne dla dalszego działania.
+    clean_texts = [str(text).strip() if pd.notna(text) and str(text).strip() else " " for text in _texts]
+
     try:
         response = client.embeddings.create(
-            input=texts,
-            model="text-embedding-3-large" # Nowoczesny i wydajny model OpenAI
+            input=clean_texts,
+            model="text-embedding-3-large"
         )
         return [item.embedding for item in response.data]
     except Exception as e:
-        st.error(f"Błąd podczas generowania wektorów OpenAI: {e}")
+        st.error(f"Błąd podczas generowania wektorów OpenAI: {e}. Sprawdź, czy Twoje pliki CSV nie zawierają pustych wierszy w kolumnach 'Keyword' lub 'Title'.")
         return None
 
 def find_first_competitor_url(row):
@@ -36,7 +43,6 @@ def generate_titles(api_key, keyword, volume, competitor_url):
     """Generuje tytuły za pomocą API OpenAI (GPT-4 Turbo)."""
     try:
         client = openai.OpenAI(api_key=api_key)
-        
         prompt = f"""
         Jesteś ekspertem SEO i copywriterem specjalizującym się w tworzeniu angażujących tytułów na polskojęzyczne blogi.
 
@@ -78,8 +84,8 @@ def generate_titles(api_key, keyword, volume, competitor_url):
 
 # --- Interfejs Użytkownika (UI) ---
 
-st.title("🚀 Planer Treści SEO [Wersja Hybrydowa]")
-st.markdown("Ulepszona wersja aplikacji, która wykorzystuje Twoje aktualne rankingi do precyzyjnego mapowania treści.")
+st.title("🚀 Planer Treści SEO [Wersja Hybrydowa v2]")
+st.markdown("Ulepszona wersja aplikacji, która wykorzystuje Twoje aktualne rankingi oraz zaawansowane modele OpenAI do precyzyjnego planowania treści.")
 
 col1, col2 = st.columns(2)
 
@@ -105,7 +111,7 @@ with col2:
 if st.button("Uruchom Analizę Hybrydową", type="primary"):
     openai_api_key = st.secrets.get("OPENAI_API_KEY")
     if not openai_api_key:
-        st.error("Klucz API OpenAI nie został znaleziony w sekretach Streamlit!")
+        st.error("Klucz API OpenAI nie został znaleziony w sekretach Streamlit! Upewnij się, że dodałeś go w ustawieniach aplikacji.")
     elif not all([content_gap_file, my_articles_file, ranking_file]):
         st.warning("Upewnij się, że wgrałeś wszystkie trzy pliki CSV.")
     else:
@@ -115,11 +121,18 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 df_articles = pd.read_csv(my_articles_file)
                 df_ranking = pd.read_csv(ranking_file)
                 
+                # Rygorystyczne czyszczenie danych
                 df_articles.rename(columns={'Address': 'URL', 'Title 1': 'Title'}, inplace=True)
-                df_articles = df_articles[~df_articles['Title'].str.contains("Bot Verification|Strona|Kategoria", na=False, case=False)]
                 df_articles.dropna(subset=['Title', 'URL'], inplace=True)
+                df_articles = df_articles[df_articles['Title'].str.strip() != '']
+                df_articles = df_articles[~df_articles['Title'].str.contains("Bot Verification|Strona|Kategoria", na=False, case=False)]
+
                 df_ranking.dropna(subset=['Słowo kluczowe', 'Adres URL'], inplace=True)
+                df_ranking = df_ranking[df_ranking['Słowo kluczowe'].str.strip() != '']
                 
+                df_gap.dropna(subset=['Keyword'], inplace=True)
+                df_gap = df_gap[df_gap['Keyword'].str.strip() != '']
+
                 st.info(f"Znaleziono {len(df_gap)} słów kluczowych w content gap, {len(df_articles)} artykułów i {len(df_ranking)} rankingowych słów kluczowych.")
             except Exception as e:
                 st.error(f"Błąd podczas wczytywania plików CSV: {e}")
@@ -133,14 +146,14 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
             keywords_for_semantic_check = []
             
             for _, row in df_gap.iterrows():
-                keyword_lower = row['Keyword'].lower()
+                keyword_lower = str(row['Keyword']).lower()
                 if keyword_lower in ranking_keywords:
                     results.append({
                         'Słowo kluczowe': row['Keyword'], 'Wolumen': row.get('Volume', 0), 
                         'Status': 'Już istnieje', 'Akcja / Dopasowany URL': ranking_map[keyword_lower], 'Podobieństwo': 1.00
                     })
                 else:
-                    keywords_for_semantic_check.append(row)
+                    keywords_for_semantic_check.append(row.to_dict())
 
             st.info(f"{len(results)} słów kluczowych zostało zmapowanych na podstawie rankingu. Pozostało {len(keywords_for_semantic_check)} do analizy semantycznej.")
 
@@ -155,23 +168,23 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 corpus_embeddings_openai = get_openai_embeddings(article_titles, openai_api_key)
                 query_embeddings_openai = get_openai_embeddings(semantic_keywords, openai_api_key)
 
-                if corpus_embeddings_openai and query_embeddings_openai:
+                if corpus_embeddings_openai is not None and query_embeddings_openai is not None:
                     corpus_tensor = torch.tensor(corpus_embeddings_openai)
                     query_tensor = torch.tensor(query_embeddings_openai)
                     
                     hits = util.semantic_search(query_tensor, corpus_tensor, top_k=1)
                     
-                    for i, row in df_semantic.iterrows():
+                    for i, row_dict in enumerate(df_semantic.to_dict('records')):
                         best_hit = hits[i][0]
                         if best_hit['score'] > similarity_threshold:
                             matched_article_url = df_articles.iloc[best_hit['corpus_id']]['URL']
                             results.append({
-                                'Słowo kluczowe': row['Keyword'], 'Wolumen': row.get('Volume', 0),
+                                'Słowo kluczowe': row_dict['Keyword'], 'Wolumen': row_dict.get('Volume', 0),
                                 'Status': 'Do optymalizacji', 'Akcja / Dopasowany URL': matched_article_url, 'Podobieństwo': round(best_hit['score'], 2)
                             })
                         else:
                             results.append({
-                                'Słowo kluczowe': row['Keyword'], 'Wolumen': row.get('Volume', 0),
+                                'Słowo kluczowe': row_dict['Keyword'], 'Wolumen': row_dict.get('Volume', 0),
                                 'Status': 'Nowy temat', 'Akcja / Dopasowany URL': 'Stwórz nowy artykuł', 'Podobieństwo': round(best_hit['score'], 2)
                             })
 
@@ -187,11 +200,9 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 st.info(f"Znaleziono {len(df_new_topics)} nowych tematów. Generuję propozycje dla {len(df_to_process)} najważniejszych...")
                 
                 original_data_for_processing = df_gap[df_gap['Keyword'].isin(df_to_process['Słowo kluczowe'])].set_index('Keyword')
-                competitor_urls = original_data_for_processing.apply(find_first_competitor_url, axis=1)
+                competitor_urls = original_data_for_processing.apply(find_first_competitor_url, axis=1).reindex(df_to_process['Słowo kluczowe']).values
                 
-                df_to_process_indexed = df_to_process.set_index('Słowo kluczowe')
-                df_to_process_indexed['Competitor URL'] = competitor_urls
-                df_to_process = df_to_process_indexed.reset_index()
+                df_to_process['Competitor URL'] = competitor_urls
 
                 progress_bar = st.progress(0, text="Generowanie tytułów (GPT-4)...")
                 total_to_process = len(df_to_process)
