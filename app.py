@@ -378,8 +378,12 @@ def export_to_google_sheets(df, spreadsheet_name="Plan Treści SEO"):
         spreadsheet = sheets_service.spreadsheets().create(body=spreadsheet).execute()
         spreadsheet_id = spreadsheet['spreadsheetId']
         
-        # Przygotowanie danych
-        df_export = df.fillna('')
+        # Przygotowanie danych - konwersja wszystkich wartości na stringi
+        df_export = df.copy()
+        # Konwersja wszystkich wartości na string aby uniknąć błędów typów
+        for col in df_export.columns:
+            df_export[col] = df_export[col].astype(str).replace('nan', '').replace('None', '')
+        
         headers = [df_export.columns.tolist()]
         values = df_export.values.tolist()
         all_data = headers + values
@@ -415,7 +419,8 @@ def export_to_google_sheets(df, spreadsheet_name="Plan Treści SEO"):
         })
         
         # Kolorowanie wierszy na podstawie statusu
-        for idx, row in df_export.iterrows():
+        for idx in range(len(df_export)):
+            row = df_export.iloc[idx]
             row_index = idx + 1  # +1 bo nagłówek jest w wierszu 0
             status = str(row.get('Status', ''))
             
@@ -860,7 +865,14 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
             )
         
         with col_download2:
-            if st.button("📊 Eksportuj do Google Sheets (z kolorami)", type="primary"):
+            # Używamy session_state aby przycisk nie resetował aplikacji
+            if 'export_clicked' not in st.session_state:
+                st.session_state.export_clicked = False
+            
+            if st.button("📊 Eksportuj do Google Sheets (z kolorami)", type="primary", key="export_sheets_btn"):
+                st.session_state.export_clicked = True
+            
+            if st.session_state.export_clicked:
                 with st.spinner("Tworzę Google Sheets z formatowaniem..."):
                     sheets_url = export_to_google_sheets(
                         df_results_sorted[existing_cols],
@@ -870,6 +882,8 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                         st.success("✅ Arkusz utworzony!")
                         st.markdown(f"🔗 [Otwórz w Google Sheets]({sheets_url})")
                         st.code(sheets_url, language=None)
+                        # Reset flagi
+                        st.session_state.export_clicked = False
         
         # Dodatkowe eksporty
         col1, col2 = st.columns(2)
