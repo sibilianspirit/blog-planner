@@ -4,3 +4,4 @@ openai
 sentence-transformers
 torch
 transformers
+hdbscan
