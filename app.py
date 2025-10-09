@@ -874,6 +874,15 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
             
             if st.session_state.export_clicked:
                 with st.spinner("Tworzę Google Sheets z formatowaniem..."):
+                    # DEBUGOWANIE - usuń później
+                    st.write("🔍 Debugowanie - Typy danych w kolumnach:")
+                    st.write(df_results_sorted[existing_cols].dtypes)
+                    st.write("🔍 Debugowanie - Przykładowe wartości:")
+                    st.write(df_results_sorted[existing_cols].head(3))
+                    st.write("🔍 Debugowanie - Sprawdzenie wartości Status:")
+                    st.write(df_results_sorted['Status'].unique()[:10])
+                    # KONIEC DEBUGOWANIA
+                    
                     sheets_url = export_to_google_sheets(
                         df_results_sorted[existing_cols],
                         f"Plan Treści SEO - {time.strftime('%Y-%m-%d %H:%M')}"
