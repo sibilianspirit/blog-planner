@@ -9,6 +9,9 @@ import time
 import math
 import hdbscan
 import numpy as np
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+import json
 
 # Ustawienia strony Streamlit
 st.set_page_config(page_title="Planer Treści SEO", layout="wide")
@@ -259,7 +262,7 @@ def generate_titles(api_key, keyword, volume, competitor_url, related_keywords="
     related_info = f"\n- Powiązane frazy do uwzględnienia: {related_keywords}" if related_keywords else ""
     
     prompt = f"""
-Jesteś ekspertem SEO i copywriterem specjalizującym się w tworzeniu angażujących tytułów na polskojęzyczne blogi.
+Jesteś ekspertem SEO i copywriterem specjalizującym się w tworzeniu angażujących tytułów na polskojęzyczne blogi sportowe i fitness.
 Przeanalizuj poniższe dane:
 - Główne słowo kluczowe: "{keyword}"
 - Miesięczny wolumen wyszukiwania: {volume}{related_info}
@@ -268,11 +271,11 @@ Przeanalizuj poniższe dane:
 Twoje zadanie: Zaproponuj 3 unikalne tytuły artykułów blogowych.
 
 ZASADY OBOWIĄZKOWE:
-1. Frazy kluczowe odmień i użyj naturalnie jeśli wymaga tego kontekst:
+1. Frazy kluczowe odmień i użyj naturalnie - NIE kopiuj dosłownie:
    ❌ ŹLE: "venum dres - jaki model wybrać"
    ✅ DOBRZE: "Dres Venum - jaki model wybrać"
    ❌ ŹLE: "karate szkoła jaką wybrać"
-   ✅ DOBRZE: "Jaką szkołę karate wybrać"
+   ✅ DOBRZE: "Jaką wybrać szkołę karate"
 
 2. Rozpoznawaj nazwy marek i traktuj je jako proper names (pisz wielką literą):
    - Venum, Manto, Adidas, Nike to marki sportowe
@@ -342,6 +345,152 @@ def validate_api_key(api_key):
     except Exception as e:
         st.error(f"Nieprawidłowy klucz API OpenAI: {e}")
         return False
+
+def export_to_google_sheets(df, spreadsheet_name="Plan Treści SEO"):
+    """
+    Eksportuje DataFrame do Google Sheets z kolorowym formatowaniem.
+    """
+    try:
+        # Pobierz credentials z Streamlit secrets
+        creds_dict = st.secrets.get("gcp_service_account")
+        if not creds_dict:
+            st.error("Brak konfiguracji Google Cloud w secrets!")
+            return None
+        
+        # Konwersja do słownika jeśli to string JSON
+        if isinstance(creds_dict, str):
+            creds_dict = json.loads(creds_dict)
+        
+        # Tworzenie credentials
+        SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+        creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+        
+        # Tworzenie usług
+        sheets_service = build('sheets', 'v4', credentials=creds)
+        drive_service = build('drive', 'v3', credentials=creds)
+        
+        # Tworzenie nowego arkusza
+        spreadsheet = {
+            'properties': {'title': spreadsheet_name},
+            'sheets': [{'properties': {'title': 'Plan Treści'}}]
+        }
+        
+        spreadsheet = sheets_service.spreadsheets().create(body=spreadsheet).execute()
+        spreadsheet_id = spreadsheet['spreadsheetId']
+        
+        # Przygotowanie danych
+        df_export = df.fillna('')
+        headers = [df_export.columns.tolist()]
+        values = df_export.values.tolist()
+        all_data = headers + values
+        
+        # Wpisanie danych
+        body = {'values': all_data}
+        sheets_service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id,
+            range='Plan Treści!A1',
+            valueInputOption='RAW',
+            body=body
+        ).execute()
+        
+        # Formatowanie kolorów
+        requests = []
+        
+        # Formatowanie nagłówków
+        requests.append({
+            'repeatCell': {
+                'range': {
+                    'sheetId': 0,
+                    'startRowIndex': 0,
+                    'endRowIndex': 1
+                },
+                'cell': {
+                    'userEnteredFormat': {
+                        'backgroundColor': {'red': 0.2, 'green': 0.2, 'blue': 0.2},
+                        'textFormat': {'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}, 'bold': True}
+                    }
+                },
+                'fields': 'userEnteredFormat(backgroundColor,textFormat)'
+            }
+        })
+        
+        # Kolorowanie wierszy na podstawie statusu
+        for idx, row in df_export.iterrows():
+            row_index = idx + 1  # +1 bo nagłówek jest w wierszu 0
+            status = str(row.get('Status', ''))
+            
+            color = None
+            if status == 'Nowy temat':
+                color = {'red': 0.91, 'green': 0.96, 'blue': 0.91}  # Zielony
+            elif 'TOP1' in status:
+                color = {'red': 1, 'green': 0.95, 'blue': 0.88}  # Pomarańczowy
+            elif 'Nie rankuje' in status:
+                color = {'red': 1, 'green': 0.92, 'blue': 0.93}  # Czerwony
+            
+            if color:
+                requests.append({
+                    'repeatCell': {
+                        'range': {
+                            'sheetId': 0,
+                            'startRowIndex': row_index,
+                            'endRowIndex': row_index + 1
+                        },
+                        'cell': {
+                            'userEnteredFormat': {
+                                'backgroundColor': color
+                            }
+                        },
+                        'fields': 'userEnteredFormat.backgroundColor'
+                    }
+                })
+        
+        # Automatyczne dostosowanie szerokości kolumn
+        requests.append({
+            'autoResizeDimensions': {
+                'dimensions': {
+                    'sheetId': 0,
+                    'dimension': 'COLUMNS',
+                    'startIndex': 0,
+                    'endIndex': len(df_export.columns)
+                }
+            }
+        })
+        
+        # Zamrożenie pierwszego wiersza
+        requests.append({
+            'updateSheetProperties': {
+                'properties': {
+                    'sheetId': 0,
+                    'gridProperties': {'frozenRowCount': 1}
+                },
+                'fields': 'gridProperties.frozenRowCount'
+            }
+        })
+        
+        # Zastosowanie formatowania
+        if requests:
+            body = {'requests': requests}
+            sheets_service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body=body
+            ).execute()
+        
+        # Udostępnianie arkusza (opcjonalnie - każdy z linkiem może oglądać)
+        permission = {
+            'type': 'anyone',
+            'role': 'reader'
+        }
+        drive_service.permissions().create(
+            fileId=spreadsheet_id,
+            body=permission
+        ).execute()
+        
+        spreadsheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
+        return spreadsheet_url
+        
+    except Exception as e:
+        st.error(f"Błąd podczas eksportu do Google Sheets: {e}")
+        return None
 
 # --- Interfejs Użytkownika (UI) ---
 st.title("🚀 Planer Treści SEO [Wersja HDBSCAN v9 - ULTIMATE]")
@@ -695,18 +844,32 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         - 🔴 Czerwony: Nie rankuje
         """)
         
-        # Export do CSV
+        # Export do CSV i Google Sheets
         csv_buffer = io.StringIO()
         df_results_sorted[existing_cols].to_csv(csv_buffer, index=False, encoding='utf-8')
         csv_bytes = csv_buffer.getvalue().encode('utf-8-sig')
 
-        st.download_button(
-            "📥 Pobierz gotowy plan treści jako CSV", 
-            csv_bytes, 
-            "plan_tresci_hdbscan_ultimate.csv", 
-            "text/csv",
-            type="primary"
-        )
+        col_download1, col_download2 = st.columns(2)
+        
+        with col_download1:
+            st.download_button(
+                "📥 Pobierz jako CSV (bez kolorów)", 
+                csv_bytes, 
+                "plan_tresci_hdbscan_ultimate.csv", 
+                "text/csv"
+            )
+        
+        with col_download2:
+            if st.button("📊 Eksportuj do Google Sheets (z kolorami)", type="primary"):
+                with st.spinner("Tworzę Google Sheets z formatowaniem..."):
+                    sheets_url = export_to_google_sheets(
+                        df_results_sorted[existing_cols],
+                        f"Plan Treści SEO - {time.strftime('%Y-%m-%d %H:%M')}"
+                    )
+                    if sheets_url:
+                        st.success("✅ Arkusz utworzony!")
+                        st.markdown(f"🔗 [Otwórz w Google Sheets]({sheets_url})")
+                        st.code(sheets_url, language=None)
         
         # Dodatkowe eksporty
         col1, col2 = st.columns(2)
