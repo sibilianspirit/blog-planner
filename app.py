@@ -16,11 +16,6 @@ import json
 # Ustawienia strony Streamlit
 st.set_page_config(page_title="Planer Treści SEO", layout="wide")
 
-# Inicjalizacja session_state do przechowywania wyników analizy
-# To jest kluczowy dodatek, który zapobiega utracie danych po kliknięciu przycisku
-if 'analysis_results' not in st.session_state:
-    st.session_state.analysis_results = None
-
 # --- Funkcje pomocnicze ---
 
 @st.cache_data(show_spinner=False)
@@ -80,6 +75,7 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
     embeddings_array = np.array(embeddings)
     
     # HDBSCAN klasteryzacja
+    # metric='euclidean' działa dobrze z embeddingami znormalizowanymi
     clusterer = hdbscan.HDBSCAN(
         min_cluster_size=min_cluster_size,
         min_samples=min_samples,
@@ -105,6 +101,7 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
     keywords_df['Jest_Outlier'] = keywords_df.get('Jest_Outlier', False)
     
     # Dodanie informacji o sile przynależności do klastra
+    # Outliers mają probability = 0
     probabilities = clusterer.probabilities_ if hasattr(clusterer, 'probabilities_') else np.ones(len(keywords_df))
     keywords_df['Cluster_Probability'] = probabilities
     
@@ -136,27 +133,18 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
             
         return group
     
-    # Użycie .apply() bez dodatkowych, przestarzałych argumentów
-    keywords_df = keywords_df.groupby('Klaster_ID').apply(get_head_keyword).reset_index(drop=True)
+    keywords_df = keywords_df.groupby('Klaster_ID', group_keys=False).apply(get_head_keyword, include_groups=False)
     
     # Dodanie informacji o jakości klastra
     def calculate_cluster_quality(group):
-        # --- POCZĄTEK POPRAWKI ---
         if len(group) <= 1:
-            group['Cluster_Quality'] = 1.0  # Klaster z 1 elementem ma idealną jakość
             return group
-        # --- KONIEC POPRAWKI ---
-            
         # Średnia probability w klastrze
         group['Cluster_Quality'] = group['Cluster_Probability'].mean()
         return group
     
-    # Użycie .apply() bez dodatkowych, przestarzałych argumentów
-    keywords_df = keywords_df.groupby('Klaster_ID').apply(calculate_cluster_quality).reset_index(drop=True)
-    
-    # Upewnienie się, że kolumna istnieje, na wypadek gdyby coś poszło nie tak
-    if 'Cluster_Quality' not in keywords_df.columns:
-        keywords_df['Cluster_Quality'] = 1.0
+    keywords_df = keywords_df.groupby('Klaster_ID', group_keys=False).apply(calculate_cluster_quality, include_groups=False)
+    keywords_df['Cluster_Quality'] = keywords_df.get('Cluster_Quality', 1.0)
     
     return keywords_df
 
@@ -815,150 +803,166 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
             with col4:
                 st.metric("Średni priorytet", f"{df_results['Priorytet_Score'].mean():.1f}")
         
-       # --- POCZĄTEK NOWEGO BLOKU WYŚWIETLANIA I EKSPORTU ---
-
-# Ta sekcja uruchomi się tylko wtedy, gdy analiza została przeprowadzona i wyniki są w pamięci
-if st.session_state.analysis_results is not None:
-    
-    st.header("📊 Wyniki Analizy i Plan Treści")
-    
-    # Pobieramy wyniki z session_state
-    df_results_sorted = st.session_state.analysis_results
-    
-    # Definicja kolejności kolumn
-    cols_order = [
-        'Słowo kluczowe', 'Wolumen', 'Priorytet_Score', 'Status', 
-        'Akcja / Dopasowany URL', 'Najbliższy_artykuł', 'Podobieństwo',
-        'Intencja', 'Aktualna_pozycja'
-    ]
-    
-    if enable_clustering:
-        cols_order.extend([
-            'Klaster_ID', 'HEAD_Keyword', 'Typ_w_klastrze', 'Liczba_fraz_w_klastrze',
-            'Jest_Outlier', 'Cluster_Probability', 'Cluster_Quality'
-        ])
-    
-    cols_order.extend(['Propozycja_tematu_1', 'Propozycja_tematu_2', 'Propozycja_tematu_3'])
-    
-    existing_cols = [col for col in cols_order if col in df_results_sorted.columns]
-    
-    # Dodanie kolorowania dla lepszej wizualizacji
-    def highlight_rows(row):
-        if row['Status'] == 'Nowy temat':
-            return ['background-color: #e8f5e9'] * len(row)
-        elif 'TOP1' in str(row['Status']):
-            return ['background-color: #fff3e0'] * len(row)
-        elif 'Nie rankuje' in str(row['Status']):
-            return ['background-color: #ffebee'] * len(row)
-        return [''] * len(row)
-    
-    st.dataframe(
-        df_results_sorted[existing_cols].style.apply(highlight_rows, axis=1),
-        use_container_width=True, # Użyj use_container_width zamiast width
-        height=600
-    )
-    
-    # Legenda kolorów
-    st.markdown("""
-    **Legenda kolorów:**
-    - 🟢 Zielony: Nowy temat
-    - 🟠 Pomarańczowy: Blisko TOP1 (optymalizacja)
-    - 🔴 Czerwony: Nie rankuje
-    """)
-    
-    # Export do CSV i Google Sheets
-    csv_buffer = io.StringIO()
-    df_results_sorted[existing_cols].to_csv(csv_buffer, index=False, encoding='utf-8')
-    csv_bytes = csv_buffer.getvalue().encode('utf-8-sig')
-
-    col_download1, col_download2 = st.columns(2)
-    
-    with col_download1:
-        st.download_button(
-            "📥 Pobierz jako CSV (bez kolorów)", 
-            csv_bytes, 
-            "plan_tresci_hdbscan_ultimate.csv", 
-            "text/csv"
-        )
-    
-    with col_download2:
-        if st.button("📊 Eksportuj do Google Sheets (z kolorami)", type="primary"):
-            with st.spinner("Tworzę Google Sheets z formatowaniem..."):
-                sheets_url = export_to_google_sheets(
-                    df_results_sorted[existing_cols],
-                    f"Plan Treści SEO - {time.strftime('%Y-%m-%d %H:%M')}"
-                )
-                if sheets_url:
-                    st.success("✅ Arkusz utworzony!")
-                    st.markdown(f"🔗 [Otwórz w Google Sheets]({sheets_url})")
-                    st.code(sheets_url, language=None)
-    
-    # Dodatkowe eksporty
-    col_export1, col_export2 = st.columns(2)
-    
-    with col_export1:
+        st.header("📊 Wyniki Analizy i Plan Treści")
+        
+        # Sortowanie wyników
+        df_results_sorted = df_results.sort_values(by=['Priorytet_Score', 'Wolumen'], ascending=[False, False])
+        
+        # Definicja kolejności kolumn
+        cols_order = [
+            'Słowo kluczowe', 'Wolumen', 'Priorytet_Score', 'Status', 
+            'Akcja / Dopasowany URL', 'Najbliższy_artykuł', 'Podobieństwo',
+            'Intencja', 'Aktualna_pozycja'
+        ]
+        
         if enable_clustering:
-            df_head_only = df_results_sorted[df_results_sorted['Typ_w_klastrze'] == 'HEAD']
-            csv_head_buffer = io.StringIO()
-            df_head_only[existing_cols].to_csv(csv_head_buffer, index=False, encoding='utf-8')
-            csv_head_bytes = csv_head_buffer.getvalue().encode('utf-8-sig')
-            
+            cols_order.extend([
+                'Klaster_ID', 'HEAD_Keyword', 'Typ_w_klastrze', 'Liczba_fraz_w_klastrze',
+                'Jest_Outlier', 'Cluster_Probability', 'Cluster_Quality'
+            ])
+        
+        cols_order.extend(['Propozycja_tematu_1', 'Propozycja_tematu_2', 'Propozycja_tematu_3'])
+        
+        existing_cols = [col for col in cols_order if col in df_results_sorted.columns]
+        
+        # Dodanie kolorowania dla lepszej wizualizacji
+        def highlight_rows(row):
+            if row['Status'] == 'Nowy temat':
+                return ['background-color: #e8f5e9'] * len(row)
+            elif 'TOP1' in str(row['Status']):
+                return ['background-color: #fff3e0'] * len(row)
+            elif 'Nie rankuje' in str(row['Status']):
+                return ['background-color: #ffebee'] * len(row)
+            return [''] * len(row)
+        
+        st.dataframe(
+            df_results_sorted[existing_cols].style.apply(highlight_rows, axis=1),
+            width='stretch',  # Zmienione z use_container_width
+            height=600
+        )
+        
+        # Legenda kolorów
+        st.markdown("""
+        **Legenda kolorów:**
+        - 🟢 Zielony: Nowy temat
+        - 🟠 Pomarańczowy: Blisko TOP1 (optymalizacja)
+        - 🔴 Czerwony: Nie rankuje
+        """)
+        
+        # Export do CSV i Google Sheets
+        csv_buffer = io.StringIO()
+        df_results_sorted[existing_cols].to_csv(csv_buffer, index=False, encoding='utf-8')
+        csv_bytes = csv_buffer.getvalue().encode('utf-8-sig')
+
+        col_download1, col_download2 = st.columns(2)
+        
+        with col_download1:
             st.download_button(
-                "📥 Pobierz tylko HEAD keywords", 
-                csv_head_bytes, 
-                "plan_tresci_head_only.csv", 
+                "📥 Pobierz jako CSV (bez kolorów)", 
+                csv_bytes, 
+                "plan_tresci_hdbscan_ultimate.csv", 
                 "text/csv"
             )
-    
-    with col_export2:
-        df_priority = df_results_sorted[df_results_sorted['Status'] == 'Nowy temat'].head(50)
-        csv_priority_buffer = io.StringIO()
-        df_priority[existing_cols].to_csv(csv_priority_buffer, index=False, encoding='utf-8')
-        csv_priority_bytes = csv_priority_buffer.getvalue().encode('utf-8-sig')
         
-        st.download_button(
-            "📥 Pobierz TOP 50 priorytetów", 
-            csv_priority_bytes, 
-            "plan_tresci_top50.csv", 
-            "text/csv"
-        )
-    
-    # Dodatkowa analiza
-    st.header("📊 Dodatkowa Analiza")
-    
-    tab1, tab2, tab3 = st.tabs(["Rozkład intencji", "Analiza wolumenu", "Jakość klastrów"])
-    
-    with tab1:
-        if 'Intencja' in df_results_sorted.columns:
-            intent_counts = df_results_sorted['Intencja'].value_counts()
-            st.bar_chart(intent_counts)
-            st.markdown("**Interpretacja:** Dominująca intencja wyszukiwania w analizowanych frazach.")
-    
-    with tab2:
-        volume_by_status = df_results_sorted.groupby('Status')['Wolumen'].sum().sort_values(ascending=False)
-        st.bar_chart(volume_by_status)
-        st.markdown("**Interpretacja:** Łączny potencjał ruchu dla każdej kategorii statusu.")
-    
-    with tab3:
-        if enable_clustering and 'Cluster_Quality' in df_results_sorted.columns:
-            quality_series = df_results_sorted[df_results_sorted['Typ_w_klastrze'] == 'HEAD']['Cluster_Quality']
-            quality_dist = pd.to_numeric(quality_series, errors='coerce').dropna()
+        with col_download2:
+            # Używamy session_state aby przycisk nie resetował aplikacji
+            if 'export_clicked' not in st.session_state:
+                st.session_state.export_clicked = False
             
-            if len(quality_dist) > 0:
-                st.line_chart(quality_dist.sort_values(ascending=False))
-                st.markdown(f"**Średnia jakość klastrów:** {quality_dist.mean():.3f}")
-                st.markdown("**Interpretacja:** Im wyższa wartość, tym bardziej spójne semantycznie są frazy w klastrze.")
+            if st.button("📊 Eksportuj do Google Sheets (z kolorami)", type="primary", key="export_sheets_btn"):
+                st.session_state.export_clicked = True
+            
+            if st.session_state.export_clicked:
+                with st.spinner("Tworzę Google Sheets z formatowaniem..."):
+                    # DEBUGOWANIE - usuń później
+                    st.write("🔍 Debugowanie - Typy danych w kolumnach:")
+                    st.write(df_results_sorted[existing_cols].dtypes)
+                    st.write("🔍 Debugowanie - Przykładowe wartości:")
+                    st.write(df_results_sorted[existing_cols].head(3))
+                    st.write("🔍 Debugowanie - Sprawdzenie wartości Status:")
+                    st.write(df_results_sorted['Status'].unique()[:10])
+                    # KONIEC DEBUGOWANIA
+                    
+                    sheets_url = export_to_google_sheets(
+                        df_results_sorted[existing_cols],
+                        f"Plan Treści SEO - {time.strftime('%Y-%m-%d %H:%M')}"
+                    )
+                    if sheets_url:
+                        st.success("✅ Arkusz utworzony!")
+                        st.markdown(f"🔗 [Otwórz w Google Sheets]({sheets_url})")
+                        st.code(sheets_url, language=None)
+                        # Reset flagi
+                        st.session_state.export_clicked = False
+        
+        # Dodatkowe eksporty
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if enable_clustering:
+                # Export tylko HEAD keywords
+                df_head_only = df_results_sorted[df_results_sorted['Typ_w_klastrze'] == 'HEAD']
+                csv_head_buffer = io.StringIO()
+                df_head_only[existing_cols].to_csv(csv_head_buffer, index=False, encoding='utf-8')
+                csv_head_bytes = csv_head_buffer.getvalue().encode('utf-8-sig')
                 
-                weak_clusters = df_results_sorted[
-                    (df_results_sorted['Typ_w_klastrze'] == 'HEAD') & 
-                    (pd.to_numeric(df_results_sorted['Cluster_Quality'], errors='coerce') < 0.5)
-                ]['Słowo kluczowe'].tolist()
+                st.download_button(
+                    "📥 Pobierz tylko HEAD keywords", 
+                    csv_head_bytes, 
+                    "plan_tresci_head_only.csv", 
+                    "text/csv"
+                )
+        
+        with col2:
+            # Export priorytetów
+            df_priority = df_results_sorted[df_results_sorted['Status'] == 'Nowy temat'].head(50)
+            csv_priority_buffer = io.StringIO()
+            df_priority[existing_cols].to_csv(csv_priority_buffer, index=False, encoding='utf-8')
+            csv_priority_bytes = csv_priority_buffer.getvalue().encode('utf-8-sig')
+            
+            st.download_button(
+                "📥 Pobierz TOP 50 priorytetów", 
+                csv_priority_bytes, 
+                "plan_tresci_top50.csv", 
+                "text/csv"
+            )
+        
+        # Dodatkowa analiza
+        st.header("📊 Dodatkowa Analiza")
+        
+        tab1, tab2, tab3 = st.tabs(["Rozkład intencji", "Analiza wolumenu", "Jakość klastrów"])
+        
+        with tab1:
+            if 'Intencja' in df_results.columns:
+                intent_counts = df_results['Intencja'].value_counts()
+                st.bar_chart(intent_counts)
+                st.markdown("**Interpretacja:** Dominująca intencja wyszukiwania w analizowanych frazach.")
+        
+        with tab2:
+            volume_by_status = df_results.groupby('Status')['Wolumen'].sum().sort_values(ascending=False)
+            st.bar_chart(volume_by_status)
+            st.markdown("**Interpretacja:** Łączny potencjał ruchu dla każdej kategorii statusu.")
+        
+        with tab3:
+            if enable_clustering and 'Cluster_Quality' in df_results.columns:
+                # Konwersja do float i usunięcie pustych wartości
+                quality_series = df_results[df_results['Typ_w_klastrze'] == 'HEAD']['Cluster_Quality']
+                quality_dist = pd.to_numeric(quality_series, errors='coerce').dropna()
                 
-                if weak_clusters:
-                    st.warning(f"⚠️ Znaleziono {len(weak_clusters)} klastrów o niskiej spójności. Rozważ ich weryfikację ręczną.")
-                    with st.expander("Zobacz listę"):
-                        for kw in weak_clusters[:10]:
-                            st.markdown(f"- {kw}")
-            else:
-                st.info("Brak danych o jakości klastrów do wyświetlenia.")
-# --- KONIEC NOWEGO BLOKU ---
+                if len(quality_dist) > 0:
+                    st.line_chart(quality_dist.sort_values(ascending=False))
+                    st.markdown(f"**Średnia jakość klastrów:** {quality_dist.mean():.3f}")
+                    st.markdown("**Interpretacja:** Im wyższa wartość, tym bardziej spójne semantycznie są frazy w klastrze.")
+                    
+                    # Ostrzeżenia o słabych klastrach
+                    weak_clusters = df_results[
+                        (df_results['Typ_w_klastrze'] == 'HEAD') & 
+                        (pd.to_numeric(df_results['Cluster_Quality'], errors='coerce') < 0.5)
+                    ]['Słowo kluczowe'].tolist()
+                    
+                    if weak_clusters:
+                        st.warning(f"⚠️ Znaleziono {len(weak_clusters)} klastrów o niskiej spójności. Rozważ ich weryfikację ręczną.")
+                        with st.expander("Zobacz listę"):
+                            for kw in weak_clusters[:10]:
+                                st.markdown(f"- {kw}")
+                else:
+                    st.info("Brak danych o jakości klastrów do wyświetlenia.")
