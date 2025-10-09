@@ -133,7 +133,7 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
             
         return group
     
-    keywords_df = keywords_df.groupby('Klaster_ID', group_keys=False).apply(get_head_keyword)
+    keywords_df = keywords_df.groupby('Klaster_ID', group_keys=False).apply(get_head_keyword, include_groups=False)
     
     # Dodanie informacji o jakości klastra
     def calculate_cluster_quality(group):
@@ -143,7 +143,7 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
         group['Cluster_Quality'] = group['Cluster_Probability'].mean()
         return group
     
-    keywords_df = keywords_df.groupby('Klaster_ID', group_keys=False).apply(calculate_cluster_quality)
+    keywords_df = keywords_df.groupby('Klaster_ID', group_keys=False).apply(calculate_cluster_quality, include_groups=False)
     keywords_df['Cluster_Quality'] = keywords_df.get('Cluster_Quality', 1.0)
     
     return keywords_df
@@ -763,7 +763,7 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 df_titles = pd.DataFrame(generated_titles_data)
                 df_results = pd.merge(df_results, df_titles, on='Słowo kluczowe', how='left')
 
-        df_results.fillna('-', inplace=True)
+        df_results.fillna('', inplace=True)  # Zmienione z '-' na ''
         st.success("✅ Analiza zakończona!")
         
         # Statystyki - rozszerzone dla HDBSCAN
@@ -837,7 +837,7 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         
         st.dataframe(
             df_results_sorted[existing_cols].style.apply(highlight_rows, axis=1),
-            use_container_width=True,
+            width='stretch',  # Zmienione z use_container_width
             height=600
         )
         
@@ -944,19 +944,25 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         
         with tab3:
             if enable_clustering and 'Cluster_Quality' in df_results.columns:
-                quality_dist = df_results[df_results['Typ_w_klastrze'] == 'HEAD']['Cluster_Quality']
-                st.line_chart(quality_dist.sort_values(ascending=False))
-                st.markdown(f"**Średnia jakość klastrów:** {quality_dist.mean():.3f}")
-                st.markdown("**Interpretacja:** Im wyższa wartość, tym bardziej spójne semantycznie są frazy w klastrze.")
+                # Konwersja do float i usunięcie pustych wartości
+                quality_series = df_results[df_results['Typ_w_klastrze'] == 'HEAD']['Cluster_Quality']
+                quality_dist = pd.to_numeric(quality_series, errors='coerce').dropna()
                 
-                # Ostrzeżenia o słabych klastrach
-                weak_clusters = df_results[
-                    (df_results['Typ_w_klastrze'] == 'HEAD') & 
-                    (df_results['Cluster_Quality'] < 0.5)
-                ]['Słowo kluczowe'].tolist()
-                
-                if weak_clusters:
-                    st.warning(f"⚠️ Znaleziono {len(weak_clusters)} klastrów o niskiej spójności. Rozważ ich weryfikację ręczną.")
-                    with st.expander("Zobacz listę"):
-                        for kw in weak_clusters[:10]:
-                            st.markdown(f"- {kw}")
+                if len(quality_dist) > 0:
+                    st.line_chart(quality_dist.sort_values(ascending=False))
+                    st.markdown(f"**Średnia jakość klastrów:** {quality_dist.mean():.3f}")
+                    st.markdown("**Interpretacja:** Im wyższa wartość, tym bardziej spójne semantycznie są frazy w klastrze.")
+                    
+                    # Ostrzeżenia o słabych klastrach
+                    weak_clusters = df_results[
+                        (df_results['Typ_w_klastrze'] == 'HEAD') & 
+                        (pd.to_numeric(df_results['Cluster_Quality'], errors='coerce') < 0.5)
+                    ]['Słowo kluczowe'].tolist()
+                    
+                    if weak_clusters:
+                        st.warning(f"⚠️ Znaleziono {len(weak_clusters)} klastrów o niskiej spójności. Rozważ ich weryfikację ręczną.")
+                        with st.expander("Zobacz listę"):
+                            for kw in weak_clusters[:10]:
+                                st.markdown(f"- {kw}")
+                else:
+                    st.info("Brak danych o jakości klastrów do wyświetlenia.")
