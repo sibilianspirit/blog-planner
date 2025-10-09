@@ -17,12 +17,9 @@ import json
 st.set_page_config(page_title="Planer Treści SEO", layout="wide")
 
 # Inicjalizacja session_state do przechowywania wyników analizy
+# To jest kluczowy dodatek, który zapobiega utracie danych po kliknięciu przycisku
 if 'analysis_results' not in st.session_state:
     st.session_state.analysis_results = None
-
-# --- Funkcje pomocnicze ---
-@st.cache_data(show_spinner=False)
-def get_openai_embeddings(texts_tuple, api_key, batch_size=256):
 
 # --- Funkcje pomocnicze ---
 
