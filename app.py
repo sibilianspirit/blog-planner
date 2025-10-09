@@ -75,7 +75,6 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
     embeddings_array = np.array(embeddings)
     
     # HDBSCAN klasteryzacja
-    # metric='euclidean' działa dobrze z embeddingami znormalizowanymi
     clusterer = hdbscan.HDBSCAN(
         min_cluster_size=min_cluster_size,
         min_samples=min_samples,
@@ -101,7 +100,6 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
     keywords_df['Jest_Outlier'] = keywords_df.get('Jest_Outlier', False)
     
     # Dodanie informacji o sile przynależności do klastra
-    # Outliers mają probability = 0
     probabilities = clusterer.probabilities_ if hasattr(clusterer, 'probabilities_') else np.ones(len(keywords_df))
     keywords_df['Cluster_Probability'] = probabilities
     
@@ -133,18 +131,27 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
             
         return group
     
-    keywords_df = keywords_df.groupby('Klaster_ID', group_keys=False).apply(get_head_keyword, include_groups=False)
+    # Użycie .apply() bez dodatkowych, przestarzałych argumentów
+    keywords_df = keywords_df.groupby('Klaster_ID').apply(get_head_keyword).reset_index(drop=True)
     
     # Dodanie informacji o jakości klastra
     def calculate_cluster_quality(group):
+        # --- POCZĄTEK POPRAWKI ---
         if len(group) <= 1:
+            group['Cluster_Quality'] = 1.0  # Klaster z 1 elementem ma idealną jakość
             return group
+        # --- KONIEC POPRAWKI ---
+            
         # Średnia probability w klastrze
         group['Cluster_Quality'] = group['Cluster_Probability'].mean()
         return group
     
-    keywords_df = keywords_df.groupby('Klaster_ID', group_keys=False).apply(calculate_cluster_quality, include_groups=False)
-    keywords_df['Cluster_Quality'] = keywords_df.get('Cluster_Quality', 1.0)
+    # Użycie .apply() bez dodatkowych, przestarzałych argumentów
+    keywords_df = keywords_df.groupby('Klaster_ID').apply(calculate_cluster_quality).reset_index(drop=True)
+    
+    # Upewnienie się, że kolumna istnieje, na wypadek gdyby coś poszło nie tak
+    if 'Cluster_Quality' not in keywords_df.columns:
+        keywords_df['Cluster_Quality'] = 1.0
     
     return keywords_df
 
