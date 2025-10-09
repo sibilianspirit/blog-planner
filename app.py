@@ -266,13 +266,42 @@ Przeanalizuj poniższe dane:
 - Artykuł konkurencji: {competitor_url}
 
 Twoje zadanie: Zaproponuj 3 unikalne tytuły artykułów blogowych.
-Zasady:
-1. Główny tytuł musi zawierać dokładną frazę kluczową: "{keyword}".
-2. Jeśli są powiązane frazy, włącz je naturalnie w treść tytułów (nie wszystkie na raz, różnicuj).
-3. Tytuły muszą mieć charakter informacyjny lub poradnikowy (np. "Jak...", "Co to jest...").
-4. Stosuj polskie zasady pisowni – tylko pierwsza litera w tytule wielka.
-5. Zamiast dwukropka używaj myślnika.
-6. Zwróć odpowiedź wyłącznie w formie listy numerowanej.
+
+ZASADY OBOWIĄZKOWE:
+1. Frazy kluczowe odmień i użyj naturalnie jeśli wymaga tego kontekst:
+   ❌ ŹLE: "venum dres - jaki model wybrać"
+   ✅ DOBRZE: "Dres Venum - jaki model wybrać"
+   ❌ ŹLE: "karate szkoła jaką wybrać"
+   ✅ DOBRZE: "Jaką szkołę karate wybrać"
+
+2. Rozpoznawaj nazwy marek i traktuj je jako proper names (pisz wielką literą):
+   - Venum, Manto, Adidas, Nike to marki sportowe
+   - NIE pisz "Co to jest manto dres" (każdy wie co to dres)
+   - PISZ "Manto - dlaczego warto wybrać ubrania od tego producenta"
+   - PISZ "Dres Manto - wszystko co musisz wiedzieć przed zakupem"
+
+3. Jeśli fraza sugeruje porównanie/ranking, JEDEN tytuł musi być rankingowy:
+   - "rękawice bokserskie" → "TOP 10 rękawic bokserskich - ranking 2025"
+   - "ochraniacze na piszczele" → "Najlepsze ochraniacze na piszczele - ranking i porównanie"
+   - Używaj formatów: TOP 10, ranking, najlepsze, porównanie
+
+4. Typy tytułów do wykorzystania (zróżnicuj 3 propozycje):
+   - Poradnikowy: "Jak wybrać...", "Na co zwrócić uwagę przy..."
+   - Rankingowy: "TOP 10...", "Najlepsze...", "Ranking..."
+   - Problemowy: "Dlaczego...", "Co musisz wiedzieć o..."
+   - Ekspercki: "Przewodnik po...", "Wszystko o..."
+
+5. Stosuj polskie zasady pisowni:
+   - Tylko pierwsza litera wielka (poza nazwami własnymi)
+   - Zamiast dwukropka używaj myślnika
+   - Naturalny, płynny język polski
+
+6. Zwróć odpowiedź WYŁĄCZNIE w formie listy numerowanej (bez dodatkowych komentarzy).
+
+Przykłady DOBRYCH tytułów:
+- "Rękawice bokserskie Venum - jak wybrać odpowiedni model dla siebie"
+- "TOP 10 najlepszych dresów do MMA - ranking 2025"
+- "Jaką wybrać szkołę karate - kompletny przewodnik dla początkujących"
 """
     
     for attempt in range(max_retries):
