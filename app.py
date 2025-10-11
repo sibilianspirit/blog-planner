@@ -12,14 +12,7 @@ import numpy as np
 
 # --- NEW: Google Sheets ---
 import gspread
-from gspread_formatting import (
-    set_conditional_formatting,
-    ConditionalFormatRule,
-    BooleanRule,
-    CellFormat,
-    Color
-)
-from gspread_formatting.dataframe import format_with_dataframe
+
 
 # -------------------------------------------------------------
 # Ustawienia strony Streamlit
@@ -318,104 +311,151 @@ def validate_api_key(api_key):
 def export_df_to_google_sheets_with_colors(df: pd.DataFrame, columns_in_order, title="Plan treści HDBSCAN"):
     """
     Tworzy nowy arkusz Google, wgrywa dane i ustawia kolorowe formatowanie
-    warunkowe wg kolumny 'Status':
-      - "Nowy temat" -> zielone tło
-      - zawiera "TOP1" -> pomarańczowe tło
-      - zawiera "Nie rankuje" -> czerwone tło
+    warunkowe wg kolumny 'Status' bez użycia gspread-formatting.
+    - "Nowy temat"  -> zielone tło
+    - zawiera "TOP1" -> pomarańczowe tło
+    - zawiera "Nie rankuje" -> czerwone tło
     Wymaga poświadczeń w st.secrets["gcp_service_account"] (JSON jako dict).
     Zwraca URL nowo utworzonego arkusza.
     """
-    # Autoryzacja z sekretów (bez pliku)
+    # Autoryzacja z sekretów
     try:
         creds_dict = st.secrets["gcp_service_account"]
     except Exception:
         st.error("Brak poświadczeń Google w st.secrets['gcp_service_account']. Dodaj JSON konta serwisowego do sekretów.")
         return None
 
+    # Opcjonalny fix dla \\n w kluczu
+    pk = creds_dict.get("private_key", "")
+    if "\\n" in pk and "\n" not in pk:
+        creds_dict["private_key"] = pk.replace("\\n", "\n")
+
     gc = gspread.service_account_from_dict(creds_dict)
+
+    # (opcjonalny) test połączenia – można usunąć po weryfikacji
     try:
-        sh = gc.create("TEST_Streamlit_GSpread")
-        st.success(f"OK! Utworzono arkusz: {sh.url}")
+        sh_test = gc.create("TEST_Streamlit_GSpread")
+        st.success(f"OK! Utworzono arkusz testowy: {sh_test.url}")
     except Exception as e:
         st.error(f"Autoryzacja/utworzenie arkusza nie powiodło się: {e}")
+        return None
 
-    # Tworzymy arkusz w Drive konta serwisowego (współdziel go z Twoim kontem, jeśli chcesz go widzieć w swoim Drive)
+    # Tworzymy doc i pierwszy sheet
     sh = gc.create(title)
     ws = sh.sheet1
     ws.update_title("Plan")
 
     # Dane
     data = df[columns_in_order]
-    # Nagłówki + wartości
     ws.update([data.columns.tolist()] + data.values.tolist())
 
-    # Ustalenie indeksów kolumn i zakresów
-    n_rows = data.shape[0] + 1  # +1 na nagłówek
+    # Wyliczenia zakresów
+    n_rows = data.shape[0] + 1  # +1 nagłówek
     n_cols = data.shape[1]
-    last_col_letter = colnum_to_letter(n_cols)
 
-    # Kolumna 'Status' – znajdź pozycję (1-indexed)
+    # Znajdź kolumnę 'Status'
     if 'Status' not in data.columns:
         st.warning("Nie znaleziono kolumny 'Status' – pomijam kolorowanie.")
         return sh.url
 
-    status_col_idx = data.columns.get_loc('Status') + 1
-    status_col_letter = colnum_to_letter(status_col_idx)
+    status_col_idx_1 = data.columns.get_loc('Status') + 1  # 1-indexed (A=1)
+    # na potrzeby batchUpdate (0-indexed):
+    status_col_idx_0 = status_col_idx_1 - 1
 
-    # Obszar formatowania: cała tabela (bez nagłówka)
-    grid_range_a1 = f"A2:{last_col_letter}{n_rows}"
+    sheet_id = ws._properties['sheetId']
 
-    # Kolorystyka
-    col_green = Color(red=0.91, green=0.96, blue=0.91)  # ~ #e8f5e9
-    col_orange = Color(red=1.0, green=0.95, blue=0.88)  # ~ #fff3e0
-    col_red = Color(red=1.0, green=0.92, blue=0.93)     # ~ #ffebee
+    # Zakres całej tabeli poza nagłówkiem (0-indexed na potrzeby batchUpdate)
+    table_range = {
+        "sheetId": sheet_id,
+        "startRowIndex": 1,        # od 2 wiersza (bez nagłówka)
+        "endRowIndex": n_rows,     # ekskluzywne
+        "startColumnIndex": 0,
+        "endColumnIndex": n_cols
+    }
 
-    fmt_green = CellFormat(backgroundColor=col_green)
-    fmt_orange = CellFormat(backgroundColor=col_orange)
-    fmt_red = CellFormat(backgroundColor=col_red)
+    # Kolory w formacie 0..1
+    col_green = {"red": 0.91, "green": 0.96, "blue": 0.91}  # ~#e8f5e9
+    col_orange = {"red": 1.00, "green": 0.95, "blue": 0.88} # ~#fff3e0
+    col_red = {"red": 1.00, "green": 0.92, "blue": 0.93}    # ~#ffebee
 
-    # Reguły warunkowe jako formuły niestandardowe (blokują się do kolumny 'Status')
-    # Uwaga: formuły w trybie EN – separatory przecinkowe
-    rule_new = ConditionalFormatRule(
-        ranges=[ws.range(grid_range_a1)],
-        booleanRule=BooleanRule(
-            condition={'type': 'CUSTOM_FORMULA', 'values': [{'userEnteredValue': f'=${status_col_letter}2="Nowy temat"'}]},
-            format=fmt_green
-        )
-    )
-    rule_top1 = ConditionalFormatRule(
-        ranges=[ws.range(grid_range_a1)],
-        booleanRule=BooleanRule(
-            condition={'type': 'CUSTOM_FORMULA', 'values': [{'userEnteredValue': f'=REGEXMATCH(${status_col_letter}2,"TOP1")'}]},
-            format=fmt_orange
-        )
-    )
-    rule_no_rank = ConditionalFormatRule(
-        ranges=[ws.range(grid_range_a1)],
-        booleanRule=BooleanRule(
-            condition={'type': 'CUSTOM_FORMULA', 'values': [{'userEnteredValue': f'=REGEXMATCH(${status_col_letter}2,"Nie rankuje")'}]},
-            format=fmt_red
-        )
-    )
+    # Formuły (EN), wiersz zaczyna się od 2 -> używamy $<kolumna>2
+    # Zrobimy trzy reguły: "Nowy temat", "TOP1", "Nie rankuje"
+    # Uwaga: odwołujemy się do konkretnej kolumny Status z $ (zablokowana kolumna), a wiersz bez $, Google skopiuje wzór w dół.
+    col_letter = colnum_to_letter(status_col_idx_1)
+    formula_new = f'=${col_letter}2="Nowy temat"'
+    formula_top1 = f'=REGEXMATCH(${col_letter}2,"TOP1")'
+    formula_no_rank = f'=REGEXMATCH(${col_letter}2,"Nie rankuje")'
 
-    set_conditional_formatting(ws, [rule_new, rule_top1, rule_no_rank])
-
-    # (opcjonalnie) auto-dopasowanie szerokości kolumn
-    try:
-        sh.batch_update({
-            "requests": [{
-                "autoResizeDimensions": {
-                    "dimensions": {
-                        "sheetId": ws._properties['sheetId'],
-                        "dimension": "COLUMNS",
-                        "startIndex": 0,
-                        "endIndex": n_cols
-                    }
+    requests = [
+        # Auto-resize kolumn
+        {
+            "autoResizeDimensions": {
+                "dimensions": {
+                    "sheetId": sheet_id,
+                    "dimension": "COLUMNS",
+                    "startIndex": 0,
+                    "endIndex": n_cols
                 }
-            }]
-        })
-    except Exception:
-        pass
+            }
+        },
+        # Zielone tło dla "Nowy temat"
+        {
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [table_range],
+                    "booleanRule": {
+                        "condition": {
+                            "type": "CUSTOM_FORMULA",
+                            "values": [{"userEnteredValue": formula_new}]
+                        },
+                        "format": {
+                            "backgroundColor": col_green
+                        }
+                    }
+                },
+                "index": 0
+            }
+        },
+        # Pomarańczowe tło dla zawierających "TOP1"
+        {
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [table_range],
+                    "booleanRule": {
+                        "condition": {
+                            "type": "CUSTOM_FORMULA",
+                            "values": [{"userEnteredValue": formula_top1}]
+                        },
+                        "format": {
+                            "backgroundColor": col_orange
+                        }
+                    }
+                },
+                "index": 0
+            }
+        },
+        # Czerwone tło dla zawierających "Nie rankuje"
+        {
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [table_range],
+                    "booleanRule": {
+                        "condition": {
+                            "type": "CUSTOM_FORMULA",
+                            "values": [{"userEnteredValue": formula_no_rank}]
+                        },
+                        "format": {
+                            "backgroundColor": col_red
+                        }
+                    }
+                },
+                "index": 0
+            }
+        }
+    ]
+
+    # Wysyłamy batchUpdate
+    sh.batch_update({"requests": requests})
 
     return sh.url
 
