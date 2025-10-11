@@ -333,7 +333,7 @@ def export_df_to_google_sheets_with_colors(
 
     # Dane
     try:
-       data = df[columns_in_order].copy()
+        data = df[columns_in_order].copy()
         # Zamień Inf/NaN na puste stringi - Google Sheets/JSON nie akceptuje NaN/Inf
         data = data.replace([np.inf, -np.inf], np.nan)
         data = data.where(pd.notna(data), "")
