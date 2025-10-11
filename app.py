@@ -333,8 +333,11 @@ def export_df_to_google_sheets_with_colors(
 
     # Dane
     try:
-        data = df[columns_in_order].copy()
-        ws.update([data.columns.tolist()] + data.values.tolist())
+       data = df[columns_in_order].copy()
+        # Zamień Inf/NaN na puste stringi - Google Sheets/JSON nie akceptuje NaN/Inf
+        data = data.replace([np.inf, -np.inf], np.nan)
+        data = data.where(pd.notna(data), "")
+        ws.update([data.columns.tolist()] + data.astype(object).values.tolist())
     except Exception as e:
         st.error(f"Nie udało się zaktualizować danych w arkuszu: {e}")
         return None
@@ -692,12 +695,21 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         for c in force_int_cols:
             if c in df_results.columns:
                 df_results[c] = pd.to_numeric(df_results[c], errors='coerce').fillna(0).astype(int)
+
+        # Najpierw rzutujemy na float, potem czyścimy Inf/NaN -> 0.0
         force_float_cols = ['Podobieństwo', 'Cluster_Probability', 'Cluster_Quality', 'Priorytet_Score']
         for c in force_float_cols:
             if c in df_results.columns:
                 df_results[c] = pd.to_numeric(df_results[c], errors='coerce')
-        obj_cols_fill = df_results.select_dtypes(include=['object']).columns
-        df_results[obj_cols_fill] = df_results[obj_cols_fill].fillna('-')
+                df_results[c] = df_results[c].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+        # Dopnij typ logiczny (ważne, by nie mieszać bool ze stringami)
+        if 'Jest_Outlier' in df_results.columns:
+            df_results['Jest_Outlier'] = df_results['Jest_Outlier'].fillna(False).astype(bool)
+
+        # Na końcu tylko tekstowe kolumny uzupełniamy '-'
+        obj_cols = df_results.select_dtypes(include=['object']).columns
+        df_results[obj_cols] = df_results[obj_cols].fillna('-')
 
         st.success("✅ Analiza zakończona!")
 
@@ -748,10 +760,18 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 return ['background-color: #ffebee'] * len(row)
             return [''] * len(row)
 
+        # Przygotuj wersję do WYŚWIETLENIA
         display_df = df_results_sorted.copy()
+
+        # Mapuj boolean na czytelny tekst tylko do WIDOKU (pod spodem zostaje bool)
+        if 'Jest_Outlier' in display_df.columns:
+            display_df['Jest_Outlier'] = display_df['Jest_Outlier'].map({True: 'TAK', False: ''})
+
+        # Uzupełnij tekstowe kolumny '-'
         obj_cols = display_df.select_dtypes(include=['object']).columns
         display_df[obj_cols] = display_df[obj_cols].fillna('-')
 
+        # Zapisz do session_state, żeby nie znikło po kliknięciu innych przycisków
         st.session_state["plan_df"] = display_df.copy()
         st.session_state["plan_cols"] = existing_cols[:]
 
