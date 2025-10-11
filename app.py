@@ -1,4 +1,6 @@
-st.sidebar.write("Build marker: 2025-10-11-#A")
+# ==== Build marker (żeby upewnić się, że deploy zaciągnął nową wersję) ====
+BUILD_MARKER = "2025-10-11-#B"
+
 import streamlit as st
 import pandas as pd
 import openai
@@ -10,15 +12,13 @@ import time
 import math
 import hdbscan
 import numpy as np
-
-# --- NEW: Google Sheets ---
 import gspread
-
 
 # -------------------------------------------------------------
 # Ustawienia strony Streamlit
 # -------------------------------------------------------------
 st.set_page_config(page_title="Planer Treści SEO", layout="wide")
+st.sidebar.write(f"Build marker: {BUILD_MARKER}")
 
 # -------------------------------------------------------------
 # Narzędzia pomocnicze
@@ -60,7 +60,7 @@ def get_openai_embeddings(texts_tuple, api_key, batch_size=256):
         try:
             response = client.embeddings.create(input=batch, model="text-embedding-3-large")
             all_embeddings.extend([item.embedding for item in response.data])
-            time.sleep(1)  # delikatny throttle
+            time.sleep(0.8)  # delikatny throttle
 
         except Exception as e:
             st.error(f"Błąd podczas przetwarzania batcha nr {i+1}: {e}")
@@ -82,7 +82,7 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
         keywords_df['Wolumen'] = keywords_df['Volume']
     ensure_numeric(keywords_df, ['Wolumen', 'Volume'])
 
-    # --- NEW: normalizacja embeddingów do metryki euklidesowej ---
+    # Normalizacja embeddingów (euclidean)
     embeddings_array = np.array(embeddings, dtype=np.float32)
     norms = np.linalg.norm(embeddings_array, axis=1, keepdims=True)
     embeddings_array = embeddings_array / np.clip(norms, 1e-12, None)
@@ -107,7 +107,7 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
         keywords_df.loc[outlier_mask, 'Klaster_ID'] = list(unique_outlier_ids)
         keywords_df.loc[outlier_mask, 'Jest_Outlier'] = True
 
-    # --- NEW: brak NaN dla nie-outlierów ---
+    # brak NaN dla nie-outlierów
     keywords_df['Jest_Outlier'] = keywords_df.get('Jest_Outlier', False)
     keywords_df['Jest_Outlier'] = keywords_df['Jest_Outlier'].fillna(False)
 
@@ -162,9 +162,9 @@ def analyze_cluster_coherence(keywords_df, embeddings):
     embeddings_array = np.array(embeddings, dtype=np.float32)
     stats = {
         'total_clusters': keywords_df['Klaster_ID'].nunique(),
-        'outliers': keywords_df['Jest_Outlier'].sum(),
-        'avg_cluster_size': keywords_df.groupby('Klaster_ID').size().mean(),
-        'max_cluster_size': keywords_df.groupby('Klaster_ID').size().max(),
+        'outliers': int(keywords_df['Jest_Outlier'].sum()),
+        'avg_cluster_size': float(keywords_df.groupby('Klaster_ID').size().mean()),
+        'max_cluster_size': int(keywords_df.groupby('Klaster_ID').size().max()),
         'clusters_details': []
     }
 
@@ -186,9 +186,9 @@ def analyze_cluster_coherence(keywords_df, embeddings):
 
         keyword_col = 'Keyword' if 'Keyword' in cluster_data.columns else 'Słowo kluczowe'
         stats['clusters_details'].append({
-            'cluster_id': cluster_id,
-            'size': len(cluster_data),
-            'avg_similarity': round(avg_similarity, 3),
+            'cluster_id': int(cluster_id),
+            'size': int(len(cluster_data)),
+            'avg_similarity': round(float(avg_similarity), 3),
             'keywords': cluster_data[keyword_col].tolist()[:5],
             'total_volume': int(cluster_data['Wolumen'].sum())
         })
@@ -284,13 +284,12 @@ Zasady:
             while len(titles) < 3:
                 titles.append("---")
 
-            time.sleep(0.5)
+            time.sleep(0.4)
             return titles[:3]
 
         except Exception as e:
             if attempt < max_retries - 1:
-                wait_time = 2 ** attempt
-                time.sleep(wait_time)
+                time.sleep(2 ** attempt)
                 continue
             else:
                 st.warning(f"Błąd podczas generowania tytułów dla '{keyword}': {e}")
@@ -307,17 +306,12 @@ def validate_api_key(api_key):
         return False
 
 # -------------------------------------------------------------
-# NEW: Eksport do Google Sheets z kolorami
+# Eksport do Google Sheets (bez gspread_formatting)
 # -------------------------------------------------------------
 def export_df_to_google_sheets_with_colors(df: pd.DataFrame, columns_in_order, title="Plan treści HDBSCAN"):
     """
     Tworzy nowy arkusz Google, wgrywa dane i ustawia kolorowe formatowanie
-    warunkowe wg kolumny 'Status' bez użycia gspread-formatting.
-    - "Nowy temat"  -> zielone tło
-    - zawiera "TOP1" -> pomarańczowe tło
-    - zawiera "Nie rankuje" -> czerwone tło
-    Wymaga poświadczeń w st.secrets["gcp_service_account"] (JSON jako dict).
-    Zwraca URL nowo utworzonego arkusza.
+    warunkowe wg kolumny 'Status' (bez gspread-formatting).
     """
     # Autoryzacja z sekretów
     try:
@@ -326,20 +320,12 @@ def export_df_to_google_sheets_with_colors(df: pd.DataFrame, columns_in_order, t
         st.error("Brak poświadczeń Google w st.secrets['gcp_service_account']. Dodaj JSON konta serwisowego do sekretów.")
         return None
 
-    # Opcjonalny fix dla \\n w kluczu
+    # Fix dla \\n w private_key
     pk = creds_dict.get("private_key", "")
     if "\\n" in pk and "\n" not in pk:
         creds_dict["private_key"] = pk.replace("\\n", "\n")
 
     gc = gspread.service_account_from_dict(creds_dict)
-
-    # (opcjonalny) test połączenia – można usunąć po weryfikacji
-    try:
-        sh_test = gc.create("TEST_Streamlit_GSpread")
-        st.success(f"OK! Utworzono arkusz testowy: {sh_test.url}")
-    except Exception as e:
-        st.error(f"Autoryzacja/utworzenie arkusza nie powiodło się: {e}")
-        return None
 
     # Tworzymy doc i pierwszy sheet
     sh = gc.create(title)
@@ -347,7 +333,7 @@ def export_df_to_google_sheets_with_colors(df: pd.DataFrame, columns_in_order, t
     ws.update_title("Plan")
 
     # Dane
-    data = df[columns_in_order]
+    data = df[columns_in_order].copy()
     ws.update([data.columns.tolist()] + data.values.tolist())
 
     # Wyliczenia zakresów
@@ -360,12 +346,9 @@ def export_df_to_google_sheets_with_colors(df: pd.DataFrame, columns_in_order, t
         return sh.url
 
     status_col_idx_1 = data.columns.get_loc('Status') + 1  # 1-indexed (A=1)
-    # na potrzeby batchUpdate (0-indexed):
-    status_col_idx_0 = status_col_idx_1 - 1
-
     sheet_id = ws._properties['sheetId']
 
-    # Zakres całej tabeli poza nagłówkiem (0-indexed na potrzeby batchUpdate)
+    # Zakres całej tabeli poza nagłówkiem (0-indexed)
     table_range = {
         "sheetId": sheet_id,
         "startRowIndex": 1,        # od 2 wiersza (bez nagłówka)
@@ -374,14 +357,12 @@ def export_df_to_google_sheets_with_colors(df: pd.DataFrame, columns_in_order, t
         "endColumnIndex": n_cols
     }
 
-    # Kolory w formacie 0..1
+    # Kolory 0..1
     col_green = {"red": 0.91, "green": 0.96, "blue": 0.91}  # ~#e8f5e9
     col_orange = {"red": 1.00, "green": 0.95, "blue": 0.88} # ~#fff3e0
     col_red = {"red": 1.00, "green": 0.92, "blue": 0.93}    # ~#ffebee
 
     # Formuły (EN), wiersz zaczyna się od 2 -> używamy $<kolumna>2
-    # Zrobimy trzy reguły: "Nowy temat", "TOP1", "Nie rankuje"
-    # Uwaga: odwołujemy się do konkretnej kolumny Status z $ (zablokowana kolumna), a wiersz bez $, Google skopiuje wzór w dół.
     col_letter = colnum_to_letter(status_col_idx_1)
     formula_new = f'=${col_letter}2="Nowy temat"'
     formula_top1 = f'=REGEXMATCH(${col_letter}2,"TOP1")'
@@ -680,6 +661,7 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
 
                 results.append(result)
 
+        # Zbiór wyników
         df_results = pd.DataFrame(results)
 
         # Scoring priorytetu
@@ -734,20 +716,21 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 df_titles = pd.DataFrame(generated_titles_data)
                 df_results = pd.merge(df_results, df_titles, on='Słowo kluczowe', how='left')
 
-            num_cols = df_results.select_dtypes(include=[np.number]).columns.tolist()
-            obj_cols = [c for c in df_results.columns if c not in num_cols]
-            df_results[obj_cols] = df_results[obj_cols].fillna('-')
-            
-            # dopnij typy, żeby Arrow/wykresy nie grymasiły
-            force_int_cols = ['Wolumen', 'Aktualna_pozycja', 'Liczba_fraz_w_klastrze', 'Klaster_ID']
-            for c in force_int_cols:
+        # --- Ujednolicenie typów i uzupełnienie braków (zawsze) ---
+        num_cols = df_results.select_dtypes(include=[np.number]).columns.tolist()
+        obj_cols = [c for c in df_results.columns if c not in num_cols]
+        df_results[obj_cols] = df_results[obj_cols].fillna('-')
+
+        force_int_cols = ['Wolumen', 'Aktualna_pozycja', 'Liczba_fraz_w_klastrze', 'Klaster_ID']
+        for c in force_int_cols:
             if c in df_results.columns:
-            df_results[c] = pd.to_numeric(df_results[c], errors='coerce').fillna(0).astype(int)
-    
+                df_results[c] = pd.to_numeric(df_results[c], errors='coerce').fillna(0).astype(int)
+
         force_float_cols = ['Podobieństwo', 'Cluster_Probability', 'Cluster_Quality', 'Priorytet_Score']
         for c in force_float_cols:
-        if c in df_results.columns:
-        df_results[c] = pd.to_numeric(df_results[c], errors='coerce')
+            if c in df_results.columns:
+                df_results[c] = pd.to_numeric(df_results[c], errors='coerce')
+
         st.success("✅ Analiza zakończona!")
 
         # Statystyki (HDBSCAN)
@@ -815,11 +798,11 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 return ['background-color: #ffebee'] * len(row)
             return [''] * len(row)
 
-       st.dataframe(
-    df_results_sorted[existing_cols].style.apply(highlight_rows, axis=1),
-    width='stretch',
-    height=600
-)
+        st.dataframe(
+            df_results_sorted[existing_cols].style.apply(highlight_rows, axis=1),
+            width='stretch',
+            height=600
+        )
 
         st.markdown("""
         **Legenda kolorów:**
@@ -870,7 +853,7 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 "text/csv"
             )
 
-        # --- NEW: Eksport do Google Sheets z kolorami ---
+        # --- Eksport do Google Sheets z kolorami ---
         st.subheader("☁️ Eksport do Google Sheets")
         gs_title_default = f"Plan treści HDBSCAN ({time.strftime('%Y-%m-%d %H:%M')})"
         gs_title = st.text_input("Tytuł nowego arkusza", value=gs_title_default)
@@ -903,17 +886,21 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
 
         with tab3:
             if enable_clustering and 'Cluster_Quality' in df_results.columns:
-        quality_dist = pd.to_numeric(
-    df_results.loc[df_results['Typ_w_klastrze'] == 'HEAD', 'Cluster_Quality'],
-    errors='coerce'
-).dropna()
-if not quality_dist.empty:
-    st.line_chart(quality_dist.sort_values(ascending=False))
-    st.markdown(f"**Średnia jakość klastrów:** {quality_dist.mean():.3f}")
+                quality_dist = pd.to_numeric(
+                    df_results.loc[df_results['Typ_w_klastrze'] == 'HEAD', 'Cluster_Quality'],
+                    errors='coerce'
+                ).dropna()
+
+                if not quality_dist.empty:
+                    st.line_chart(quality_dist.sort_values(ascending=False))
+                    st.markdown(f"**Średnia jakość klastrów:** {quality_dist.mean():.3f}")
+
+                # Ostrzeżenia o słabych klastrach (< 0.5)
                 weak_clusters = df_results[
                     (df_results['Typ_w_klastrze'] == 'HEAD') &
-                    (df_results['Cluster_Quality'] < 0.5)
-                ]['Słowo kluczowe'].tolist()
+                    (pd.to_numeric(df_results['Cluster_Quality'], errors='coerce') < 0.5)
+                ]['Słowo kluczowe'].dropna().tolist()
+
                 if weak_clusters:
                     st.warning(f"⚠️ Znaleziono {len(weak_clusters)} klastrów o niskiej spójności. Rozważ ich weryfikację ręczną.")
                     with st.expander("Zobacz listę"):
