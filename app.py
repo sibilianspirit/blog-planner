@@ -362,11 +362,13 @@ def export_df_to_google_sheets_with_colors(
         col_green = {"red": 0.91, "green": 0.96, "blue": 0.91}
         col_orange = {"red": 1.00, "green": 0.95, "blue": 0.88}
         col_red = {"red": 1.00, "green": 0.92, "blue": 0.93}
-        col_letter = colnum_to_letter(status_col_idx_1)
-        formula_new = f'=${col_letter}2="Nowy temat"'
-        formula_top1 = f'=REGEXMATCH(${col_letter}2,"TOP1")'
-        formula_no_rank = f'=REGEXMATCH(${col_letter}2,"Nie rankuje")'
+
+        status_col_letter = colnum_to_letter(status_col_idx_1)
+        # Startujemy od 2. wiersza (pierwszy to nagłówek)
+        base_cell = f"${status_col_letter}2"
+
         requests = [
+            # Auto-resize kolumn
             {
                 "autoResizeDimensions": {
                     "dimensions": {
@@ -377,6 +379,7 @@ def export_df_to_google_sheets_with_colors(
                     }
                 }
             },
+            # Zielone tło dla dokładnie "Nowy temat"
             {
                 "addConditionalFormatRule": {
                     "rule": {
@@ -384,7 +387,9 @@ def export_df_to_google_sheets_with_colors(
                         "booleanRule": {
                             "condition": {
                                 "type": "CUSTOM_FORMULA",
-                                "values": [{"userEnteredValue": formula_new}]
+                                "values": [
+                                    {"userEnteredValue": f"={base_cell}=\"Nowy temat\""}
+                                ]
                             },
                             "format": {"backgroundColor": col_green}
                         }
@@ -392,14 +397,17 @@ def export_df_to_google_sheets_with_colors(
                     "index": 0
                 }
             },
+            # Pomarańczowe tło gdy Status zawiera "TOP1"
             {
                 "addConditionalFormatRule": {
                     "rule": {
                         "ranges": [table_range],
                         "booleanRule": {
                             "condition": {
-                                "type": "CUSTOM_FORMULA",
-                                "values": [{"userEnteredValue": formula_top1}]
+                                "type": "TEXT_CONTAINS",
+                                "values": [
+                                    {"userEnteredValue": "TOP1"}
+                                ]
                             },
                             "format": {"backgroundColor": col_orange}
                         }
@@ -407,14 +415,17 @@ def export_df_to_google_sheets_with_colors(
                     "index": 0
                 }
             },
+            # Czerwone tło gdy Status zawiera "Nie rankuje"
             {
                 "addConditionalFormatRule": {
                     "rule": {
                         "ranges": [table_range],
                         "booleanRule": {
                             "condition": {
-                                "type": "CUSTOM_FORMULA",
-                                "values": [{"userEnteredValue": formula_no_rank}]
+                                "type": "TEXT_CONTAINS",
+                                "values": [
+                                    {"userEnteredValue": "Nie rankuje"}
+                                ]
                             },
                             "format": {"backgroundColor": col_red}
                         }
@@ -423,6 +434,7 @@ def export_df_to_google_sheets_with_colors(
                 }
             }
         ]
+
         sh.batch_update({"requests": requests})
     except Exception as e:
         # Sam eksport zadziałał; tylko kolorowanie się wywaliło – nie blokuj zwrotu URL
