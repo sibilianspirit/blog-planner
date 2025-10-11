@@ -482,7 +482,7 @@ if st.button("🔍 Test połączenia z Google Sheets (A1 -> timestamp)", key="gs
             except gspread.WorksheetNotFound:
                 ws = sh.add_worksheet(title="Plan", rows="1000", cols="26")
             import datetime as _dt
-            ws.update("A1", f"Połączenie OK @ {_dt.datetime.now().isoformat(timespec='seconds')}")
+            ws.update_acell("A1", f"Połączenie OK @ {_dt.datetime.now().isoformat(timespec='seconds')}")
             st.success(f"OK ✅ Zapisano timestamp do A1. Arkusz: {sh.url}")
     except Exception as e:
         st.exception(e)
