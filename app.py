@@ -1,3 +1,4 @@
+st.sidebar.write("Build marker: 2025-10-11-#A")
 import streamlit as st
 import pandas as pd
 import openai
@@ -733,7 +734,20 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 df_titles = pd.DataFrame(generated_titles_data)
                 df_results = pd.merge(df_results, df_titles, on='Słowo kluczowe', how='left')
 
-        df_results.fillna('-', inplace=True)
+            num_cols = df_results.select_dtypes(include=[np.number]).columns.tolist()
+            obj_cols = [c for c in df_results.columns if c not in num_cols]
+            df_results[obj_cols] = df_results[obj_cols].fillna('-')
+            
+            # dopnij typy, żeby Arrow/wykresy nie grymasiły
+            force_int_cols = ['Wolumen', 'Aktualna_pozycja', 'Liczba_fraz_w_klastrze', 'Klaster_ID']
+            for c in force_int_cols:
+            if c in df_results.columns:
+            df_results[c] = pd.to_numeric(df_results[c], errors='coerce').fillna(0).astype(int)
+    
+        force_float_cols = ['Podobieństwo', 'Cluster_Probability', 'Cluster_Quality', 'Priorytet_Score']
+        for c in force_float_cols:
+        if c in df_results.columns:
+        df_results[c] = pd.to_numeric(df_results[c], errors='coerce')
         st.success("✅ Analiza zakończona!")
 
         # Statystyki (HDBSCAN)
@@ -801,11 +815,11 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 return ['background-color: #ffebee'] * len(row)
             return [''] * len(row)
 
-        st.dataframe(
-            df_results_sorted[existing_cols].style.apply(highlight_rows, axis=1),
-            use_container_width=True,
-            height=600
-        )
+       st.dataframe(
+    df_results_sorted[existing_cols].style.apply(highlight_rows, axis=1),
+    width='stretch',
+    height=600
+)
 
         st.markdown("""
         **Legenda kolorów:**
@@ -889,9 +903,13 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
 
         with tab3:
             if enable_clustering and 'Cluster_Quality' in df_results.columns:
-                quality_dist = df_results[df_results['Typ_w_klastrze'] == 'HEAD']['Cluster_Quality']
-                st.line_chart(quality_dist.sort_values(ascending=False))
-                st.markdown(f"**Średnia jakość klastrów:** {quality_dist.mean():.3f}")
+        quality_dist = pd.to_numeric(
+    df_results.loc[df_results['Typ_w_klastrze'] == 'HEAD', 'Cluster_Quality'],
+    errors='coerce'
+).dropna()
+if not quality_dist.empty:
+    st.line_chart(quality_dist.sort_values(ascending=False))
+    st.markdown(f"**Średnia jakość klastrów:** {quality_dist.mean():.3f}")
                 weak_clusters = df_results[
                     (df_results['Typ_w_klastrze'] == 'HEAD') &
                     (df_results['Cluster_Quality'] < 0.5)
