@@ -13,11 +13,18 @@ import math
 import hdbscan
 import numpy as np
 import gspread
+import warnings
+warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"hdbscan\.robust_single_linkage_")
 
 # -------------------------------------------------------------
 # Ustawienia strony Streamlit
 # -------------------------------------------------------------
 st.set_page_config(page_title="Planer Treści SEO", layout="wide")
+# --- Pamięć wyników między rerunami ---
+if "plan_df" not in st.session_state:
+    st.session_state["plan_df"] = None
+if "plan_cols" not in st.session_state:
+    st.session_state["plan_cols"] = None
 st.sidebar.write(f"Build marker: {BUILD_MARKER}")
 
 # -------------------------------------------------------------
@@ -717,10 +724,6 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 df_results = pd.merge(df_results, df_titles, on='Słowo kluczowe', how='left')
 
         # --- Ujednolicenie typów i uzupełnienie braków (zawsze) ---
-        num_cols = df_results.select_dtypes(include=[np.number]).columns.tolist()
-        obj_cols = [c for c in df_results.columns if c not in num_cols]
-        df_results[obj_cols] = df_results[obj_cols].fillna('-')
-
         force_int_cols = ['Wolumen', 'Aktualna_pozycja', 'Liczba_fraz_w_klastrze', 'Klaster_ID']
         for c in force_int_cols:
             if c in df_results.columns:
@@ -731,6 +734,10 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
             if c in df_results.columns:
                 df_results[c] = pd.to_numeric(df_results[c], errors='coerce')
 
+        # Potem uzupełniamy brakujące w kolumnach tekstowych
+        obj_cols = df_results.select_dtypes(include=['object']).columns
+        df_results[obj_cols] = df_results[obj_cols].fillna('-')
+       
         st.success("✅ Analiza zakończona!")
 
         # Statystyki (HDBSCAN)
@@ -798,11 +805,21 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 return ['background-color: #ffebee'] * len(row)
             return [''] * len(row)
 
+        # Przygotuj wersję do WYŚWIETLENIA (tylko kolumny tekstowe uzupełnij '-')
+        display_df = df_results_sorted.copy()
+        obj_cols = display_df.select_dtypes(include=['object']).columns
+        display_df[obj_cols] = display_df[obj_cols].fillna('-')
+
+        # Zapisz do session_state, żeby nie znikło po kliknięciu innych przycisków
+        st.session_state["plan_df"] = display_df.copy()
+        st.session_state["plan_cols"] = existing_cols[:]
+
         st.dataframe(
-            df_results_sorted[existing_cols].style.apply(highlight_rows, axis=1),
+            display_df[existing_cols].style.apply(highlight_rows, axis=1),
             width='stretch',
             height=600
         )
+
 
         st.markdown("""
         **Legenda kolorów:**
@@ -853,21 +870,6 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 "text/csv"
             )
 
-        # --- Eksport do Google Sheets z kolorami ---
-        st.subheader("☁️ Eksport do Google Sheets")
-        gs_title_default = f"Plan treści HDBSCAN ({time.strftime('%Y-%m-%d %H:%M')})"
-        gs_title = st.text_input("Tytuł nowego arkusza", value=gs_title_default)
-
-        if st.button("Wyślij do Google Sheets (z kolorami)"):
-            with st.spinner("Wysyłam dane do Google Sheets i ustawiam kolorowanie..."):
-                url = export_df_to_google_sheets_with_colors(
-                    df_results_sorted,
-                    existing_cols,
-                    title=gs_title
-                )
-                if url:
-                    st.success(f"Gotowe! Otwórz arkusz: {url}")
-
         # Dodatkowa analiza
         st.header("📊 Dodatkowa Analiza")
 
@@ -906,3 +908,44 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                     with st.expander("Zobacz listę"):
                         for kw in weak_clusters[:10]:
                             st.markdown(f"- {kw}")
+# =========================================
+# STAŁA SEKCJA EKSPORTU / POBIERANIA (poza analizą)
+# =========================================
+st.subheader("☁️ Eksport / Pobieranie")
+
+if st.session_state.get("plan_df") is None or st.session_state.get("plan_cols") is None:
+    st.info("Najpierw uruchom analizę, żeby włączyć eksport i pobieranie.")
+else:
+    gs_title_default = f"Plan treści HDBSCAN ({time.strftime('%Y-%m-%d %H:%M')})"
+    gs_title = st.text_input("Tytuł nowego arkusza", value=gs_title_default, key="gs_title")
+
+    # Pobieranie aktualnej wersji CSV (z pamięci)
+    export_df = st.session_state["plan_df"][st.session_state["plan_cols"]].copy()
+    csv_buffer = io.StringIO()
+    export_df.to_csv(csv_buffer, index=False, encoding='utf-8')
+    csv_bytes = csv_buffer.getvalue().encode('utf-8-sig')
+
+    st.download_button(
+        "📥 Pobierz aktualny plan (CSV)",
+        data=csv_bytes,
+        file_name="plan_tresci_hdbscan_ultimate.csv",
+        mime="text/csv",
+        type="primary",
+        key="dl_csv_latest"
+    )
+
+    # Eksport do Google Sheets (z kolorami) – z pamięci
+    if st.button("Wyślij do Google Sheets (z kolorami)", key="export_gs"):
+        try:
+            with st.spinner("Wysyłam dane do Google Sheets i ustawiam kolorowanie..."):
+                url = export_df_to_google_sheets_with_colors(
+                    st.session_state["plan_df"],
+                    st.session_state["plan_cols"],
+                    title=gs_title
+                )
+            if url:
+                st.success(f"Gotowe! Otwórz arkusz: {url}")
+            else:
+                st.error("Eksport nie zwrócił adresu URL. Sprawdź logi/sekrety.")
+        except Exception as e:
+            st.exception(e)
