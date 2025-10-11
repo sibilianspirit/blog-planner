@@ -9,6 +9,9 @@ import time
 import math
 import hdbscan
 import numpy as np
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+import json
 
 # Ustawienia strony Streamlit
 st.set_page_config(page_title="Planer Treści SEO", layout="wide")
@@ -130,7 +133,7 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
             
         return group
     
-    keywords_df = keywords_df.groupby('Klaster_ID', group_keys=False).apply(get_head_keyword)
+    keywords_df = keywords_df.groupby('Klaster_ID', group_keys=False).apply(get_head_keyword, include_groups=False)
     
     # Dodanie informacji o jakości klastra
     def calculate_cluster_quality(group):
@@ -140,7 +143,7 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
         group['Cluster_Quality'] = group['Cluster_Probability'].mean()
         return group
     
-    keywords_df = keywords_df.groupby('Klaster_ID', group_keys=False).apply(calculate_cluster_quality)
+    keywords_df = keywords_df.groupby('Klaster_ID', group_keys=False).apply(calculate_cluster_quality, include_groups=False)
     keywords_df['Cluster_Quality'] = keywords_df.get('Cluster_Quality', 1.0)
     
     return keywords_df
@@ -259,20 +262,49 @@ def generate_titles(api_key, keyword, volume, competitor_url, related_keywords="
     related_info = f"\n- Powiązane frazy do uwzględnienia: {related_keywords}" if related_keywords else ""
     
     prompt = f"""
-Jesteś ekspertem SEO i copywriterem specjalizującym się w tworzeniu angażujących tytułów na polskojęzyczne blogi.
+Jesteś ekspertem SEO i copywriterem specjalizującym się w tworzeniu angażujących tytułów na polskojęzyczne blogi sportowe i fitness.
 Przeanalizuj poniższe dane:
 - Główne słowo kluczowe: "{keyword}"
 - Miesięczny wolumen wyszukiwania: {volume}{related_info}
 - Artykuł konkurencji: {competitor_url}
 
 Twoje zadanie: Zaproponuj 3 unikalne tytuły artykułów blogowych.
-Zasady:
-1. Główny tytuł musi zawierać dokładną frazę kluczową: "{keyword}".
-2. Jeśli są powiązane frazy, włącz je naturalnie w treść tytułów (nie wszystkie na raz, różnicuj).
-3. Tytuły muszą mieć charakter informacyjny lub poradnikowy (np. "Jak...", "Co to jest...").
-4. Stosuj polskie zasady pisowni – tylko pierwsza litera w tytule wielka.
-5. Zamiast dwukropka używaj myślnika.
-6. Zwróć odpowiedź wyłącznie w formie listy numerowanej.
+
+ZASADY OBOWIĄZKOWE:
+1. Frazy kluczowe odmień i użyj naturalnie - NIE kopiuj dosłownie:
+   ❌ ŹLE: "venum dres - jaki model wybrać"
+   ✅ DOBRZE: "Dres Venum - jaki model wybrać"
+   ❌ ŹLE: "karate szkoła jaką wybrać"
+   ✅ DOBRZE: "Jaką wybrać szkołę karate"
+
+2. Rozpoznawaj nazwy marek i traktuj je jako proper names (pisz wielką literą):
+   - Venum, Manto, Adidas, Nike to marki sportowe
+   - NIE pisz "Co to jest manto dres" (każdy wie co to dres)
+   - PISZ "Manto - dlaczego warto wybrać ubrania od tego producenta"
+   - PISZ "Dres Manto - wszystko co musisz wiedzieć przed zakupem"
+
+3. Jeśli fraza sugeruje porównanie/ranking, JEDEN tytuł musi być rankingowy:
+   - "rękawice bokserskie" → "TOP 10 rękawic bokserskich - ranking 2025"
+   - "ochraniacze na piszczele" → "Najlepsze ochraniacze na piszczele - ranking i porównanie"
+   - Używaj formatów: TOP 10, ranking, najlepsze, porównanie
+
+4. Typy tytułów do wykorzystania (zróżnicuj 3 propozycje):
+   - Poradnikowy: "Jak wybrać...", "Na co zwrócić uwagę przy..."
+   - Rankingowy: "TOP 10...", "Najlepsze...", "Ranking..."
+   - Problemowy: "Dlaczego...", "Co musisz wiedzieć o..."
+   - Ekspercki: "Przewodnik po...", "Wszystko o..."
+
+5. Stosuj polskie zasady pisowni:
+   - Tylko pierwsza litera wielka (poza nazwami własnymi)
+   - Zamiast dwukropka używaj myślnika
+   - Naturalny, płynny język polski
+
+6. Zwróć odpowiedź WYŁĄCZNIE w formie listy numerowanej (bez dodatkowych komentarzy).
+
+Przykłady DOBRYCH tytułów:
+- "Rękawice bokserskie Venum - jak wybrać odpowiedni model dla siebie"
+- "TOP 10 najlepszych dresów do MMA - ranking 2025"
+- "Jaką wybrać szkołę karate - kompletny przewodnik dla początkujących"
 """
     
     for attempt in range(max_retries):
@@ -313,6 +345,157 @@ def validate_api_key(api_key):
     except Exception as e:
         st.error(f"Nieprawidłowy klucz API OpenAI: {e}")
         return False
+
+def export_to_google_sheets(df, spreadsheet_name="Plan Treści SEO"):
+    """
+    Eksportuje DataFrame do Google Sheets z kolorowym formatowaniem.
+    """
+    try:
+        # Pobierz credentials z Streamlit secrets
+        creds_dict = st.secrets.get("gcp_service_account")
+        if not creds_dict:
+            st.error("Brak konfiguracji Google Cloud w secrets!")
+            return None
+        
+        # Konwersja do słownika jeśli to string JSON
+        if isinstance(creds_dict, str):
+            creds_dict = json.loads(creds_dict)
+        
+        # Tworzenie credentials
+        SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+        creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+        
+        # Tworzenie usług
+        sheets_service = build('sheets', 'v4', credentials=creds)
+        drive_service = build('drive', 'v3', credentials=creds)
+        
+        # Tworzenie nowego arkusza
+        spreadsheet = {
+            'properties': {'title': spreadsheet_name},
+            'sheets': [{'properties': {'title': 'Plan Treści'}}]
+        }
+        
+        spreadsheet = sheets_service.spreadsheets().create(body=spreadsheet).execute()
+        spreadsheet_id = spreadsheet['spreadsheetId']
+        
+        # Przygotowanie danych - konwersja wszystkich wartości na stringi
+        df_export = df.copy()
+        # Konwersja wszystkich wartości na string aby uniknąć błędów typów
+        for col in df_export.columns:
+            df_export[col] = df_export[col].astype(str).replace('nan', '').replace('None', '')
+        
+        headers = [df_export.columns.tolist()]
+        values = df_export.values.tolist()
+        all_data = headers + values
+        
+        # Wpisanie danych
+        body = {'values': all_data}
+        sheets_service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id,
+            range='Plan Treści!A1',
+            valueInputOption='RAW',
+            body=body
+        ).execute()
+        
+        # Formatowanie kolorów
+        requests = []
+        
+        # Formatowanie nagłówków
+        requests.append({
+            'repeatCell': {
+                'range': {
+                    'sheetId': 0,
+                    'startRowIndex': 0,
+                    'endRowIndex': 1
+                },
+                'cell': {
+                    'userEnteredFormat': {
+                        'backgroundColor': {'red': 0.2, 'green': 0.2, 'blue': 0.2},
+                        'textFormat': {'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}, 'bold': True}
+                    }
+                },
+                'fields': 'userEnteredFormat(backgroundColor,textFormat)'
+            }
+        })
+        
+        # Kolorowanie wierszy na podstawie statusu
+        for idx in range(len(df_export)):
+            row = df_export.iloc[idx]
+            row_index = idx + 1  # +1 bo nagłówek jest w wierszu 0
+            status = str(row.get('Status', ''))
+            
+            color = None
+            if status == 'Nowy temat':
+                color = {'red': 0.91, 'green': 0.96, 'blue': 0.91}  # Zielony
+            elif 'TOP1' in status:
+                color = {'red': 1, 'green': 0.95, 'blue': 0.88}  # Pomarańczowy
+            elif 'Nie rankuje' in status:
+                color = {'red': 1, 'green': 0.92, 'blue': 0.93}  # Czerwony
+            
+            if color:
+                requests.append({
+                    'repeatCell': {
+                        'range': {
+                            'sheetId': 0,
+                            'startRowIndex': row_index,
+                            'endRowIndex': row_index + 1
+                        },
+                        'cell': {
+                            'userEnteredFormat': {
+                                'backgroundColor': color
+                            }
+                        },
+                        'fields': 'userEnteredFormat.backgroundColor'
+                    }
+                })
+        
+        # Automatyczne dostosowanie szerokości kolumn
+        requests.append({
+            'autoResizeDimensions': {
+                'dimensions': {
+                    'sheetId': 0,
+                    'dimension': 'COLUMNS',
+                    'startIndex': 0,
+                    'endIndex': len(df_export.columns)
+                }
+            }
+        })
+        
+        # Zamrożenie pierwszego wiersza
+        requests.append({
+            'updateSheetProperties': {
+                'properties': {
+                    'sheetId': 0,
+                    'gridProperties': {'frozenRowCount': 1}
+                },
+                'fields': 'gridProperties.frozenRowCount'
+            }
+        })
+        
+        # Zastosowanie formatowania
+        if requests:
+            body = {'requests': requests}
+            sheets_service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body=body
+            ).execute()
+        
+        # Udostępnianie arkusza (opcjonalnie - każdy z linkiem może oglądać)
+        permission = {
+            'type': 'anyone',
+            'role': 'reader'
+        }
+        drive_service.permissions().create(
+            fileId=spreadsheet_id,
+            body=permission
+        ).execute()
+        
+        spreadsheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
+        return spreadsheet_url
+        
+    except Exception as e:
+        st.error(f"Błąd podczas eksportu do Google Sheets: {e}")
+        return None
 
 # --- Interfejs Użytkownika (UI) ---
 st.title("🚀 Planer Treści SEO [Wersja HDBSCAN v9 - ULTIMATE]")
@@ -580,7 +763,7 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 df_titles = pd.DataFrame(generated_titles_data)
                 df_results = pd.merge(df_results, df_titles, on='Słowo kluczowe', how='left')
 
-        df_results.fillna('-', inplace=True)
+        df_results.fillna('', inplace=True)  # Zmienione z '-' na ''
         st.success("✅ Analiza zakończona!")
         
         # Statystyki - rozszerzone dla HDBSCAN
@@ -654,7 +837,7 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         
         st.dataframe(
             df_results_sorted[existing_cols].style.apply(highlight_rows, axis=1),
-            use_container_width=True,
+            width='stretch',  # Zmienione z use_container_width
             height=600
         )
         
@@ -666,18 +849,50 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         - 🔴 Czerwony: Nie rankuje
         """)
         
-        # Export do CSV
+        # Export do CSV i Google Sheets
         csv_buffer = io.StringIO()
         df_results_sorted[existing_cols].to_csv(csv_buffer, index=False, encoding='utf-8')
         csv_bytes = csv_buffer.getvalue().encode('utf-8-sig')
 
-        st.download_button(
-            "📥 Pobierz gotowy plan treści jako CSV", 
-            csv_bytes, 
-            "plan_tresci_hdbscan_ultimate.csv", 
-            "text/csv",
-            type="primary"
-        )
+        col_download1, col_download2 = st.columns(2)
+        
+        with col_download1:
+            st.download_button(
+                "📥 Pobierz jako CSV (bez kolorów)", 
+                csv_bytes, 
+                "plan_tresci_hdbscan_ultimate.csv", 
+                "text/csv"
+            )
+        
+        with col_download2:
+            # Używamy session_state aby przycisk nie resetował aplikacji
+            if 'export_clicked' not in st.session_state:
+                st.session_state.export_clicked = False
+            
+            if st.button("📊 Eksportuj do Google Sheets (z kolorami)", type="primary", key="export_sheets_btn"):
+                st.session_state.export_clicked = True
+            
+            if st.session_state.export_clicked:
+                with st.spinner("Tworzę Google Sheets z formatowaniem..."):
+                    # DEBUGOWANIE - usuń później
+                    st.write("🔍 Debugowanie - Typy danych w kolumnach:")
+                    st.write(df_results_sorted[existing_cols].dtypes)
+                    st.write("🔍 Debugowanie - Przykładowe wartości:")
+                    st.write(df_results_sorted[existing_cols].head(3))
+                    st.write("🔍 Debugowanie - Sprawdzenie wartości Status:")
+                    st.write(df_results_sorted['Status'].unique()[:10])
+                    # KONIEC DEBUGOWANIA
+                    
+                    sheets_url = export_to_google_sheets(
+                        df_results_sorted[existing_cols],
+                        f"Plan Treści SEO - {time.strftime('%Y-%m-%d %H:%M')}"
+                    )
+                    if sheets_url:
+                        st.success("✅ Arkusz utworzony!")
+                        st.markdown(f"🔗 [Otwórz w Google Sheets]({sheets_url})")
+                        st.code(sheets_url, language=None)
+                        # Reset flagi
+                        st.session_state.export_clicked = False
         
         # Dodatkowe eksporty
         col1, col2 = st.columns(2)
@@ -729,19 +944,25 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         
         with tab3:
             if enable_clustering and 'Cluster_Quality' in df_results.columns:
-                quality_dist = df_results[df_results['Typ_w_klastrze'] == 'HEAD']['Cluster_Quality']
-                st.line_chart(quality_dist.sort_values(ascending=False))
-                st.markdown(f"**Średnia jakość klastrów:** {quality_dist.mean():.3f}")
-                st.markdown("**Interpretacja:** Im wyższa wartość, tym bardziej spójne semantycznie są frazy w klastrze.")
+                # Konwersja do float i usunięcie pustych wartości
+                quality_series = df_results[df_results['Typ_w_klastrze'] == 'HEAD']['Cluster_Quality']
+                quality_dist = pd.to_numeric(quality_series, errors='coerce').dropna()
                 
-                # Ostrzeżenia o słabych klastrach
-                weak_clusters = df_results[
-                    (df_results['Typ_w_klastrze'] == 'HEAD') & 
-                    (df_results['Cluster_Quality'] < 0.5)
-                ]['Słowo kluczowe'].tolist()
-                
-                if weak_clusters:
-                    st.warning(f"⚠️ Znaleziono {len(weak_clusters)} klastrów o niskiej spójności. Rozważ ich weryfikację ręczną.")
-                    with st.expander("Zobacz listę"):
-                        for kw in weak_clusters[:10]:
-                            st.markdown(f"- {kw}")
+                if len(quality_dist) > 0:
+                    st.line_chart(quality_dist.sort_values(ascending=False))
+                    st.markdown(f"**Średnia jakość klastrów:** {quality_dist.mean():.3f}")
+                    st.markdown("**Interpretacja:** Im wyższa wartość, tym bardziej spójne semantycznie są frazy w klastrze.")
+                    
+                    # Ostrzeżenia o słabych klastrach
+                    weak_clusters = df_results[
+                        (df_results['Typ_w_klastrze'] == 'HEAD') & 
+                        (pd.to_numeric(df_results['Cluster_Quality'], errors='coerce') < 0.5)
+                    ]['Słowo kluczowe'].tolist()
+                    
+                    if weak_clusters:
+                        st.warning(f"⚠️ Znaleziono {len(weak_clusters)} klastrów o niskiej spójności. Rozważ ich weryfikację ręczną.")
+                        with st.expander("Zobacz listę"):
+                            for kw in weak_clusters[:10]:
+                                st.markdown(f"- {kw}")
+                else:
+                    st.info("Brak danych o jakości klastrów do wyświetlenia.")
