@@ -604,7 +604,7 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
             if position_col:
                 df_ranking[position_col] = pd.to_numeric(df_ranking[position_col], errors='coerce').fillna(0).astype(int)
 
-            st.info(f"Wczytano {len(df_gap)} słów kluczowych, {len[df_articles]} artykułów i {len(df_ranking)} rankingowych słów kluczowych.")
+            st.info(f"Wczytano {len(df_gap)} słów kluczowych, {len(df_articles)} artykułów i {len(df_ranking)} rankingowych słów kluczowych.")
         except Exception as e:
             st.error(f"Błąd podczas wczytywania plików CSV: {e}")
             st.stop()
