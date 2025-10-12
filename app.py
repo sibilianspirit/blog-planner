@@ -23,8 +23,6 @@ if "plan_df" not in st.session_state:
     st.session_state["plan_df"] = None
 if "plan_cols" not in st.session_state:
     st.session_state["plan_cols"] = None
-st.sidebar.write(f"Build marker: {BUILD_MARKER}")
-
 # -------------------------------------------------------------
 # Narzędzia pomocnicze
 # -------------------------------------------------------------
