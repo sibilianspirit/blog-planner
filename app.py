@@ -11,9 +11,11 @@ import hdbscan
 import numpy as np
 import gspread
 import warnings
-import difflib  # <= NOWE
+import difflib
 
+# ===== Wycisz wybrane FutureWarningi (3rd party) =====
 warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"hdbscan\.robust_single_linkage_")
+warnings.filterwarnings("ignore", category=FutureWarning, module=r"sklearn\.utils\.deprecation")
 
 # -------------------------------------------------------------
 # Ustawienia strony Streamlit
@@ -42,7 +44,6 @@ def ensure_numeric(df: pd.DataFrame, cols):
             df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0).astype(int)
 
 def _get_gspread_client():
-    """Autoryzacja gspread z secrets + fix dla \\n"""
     try:
         creds_dict = st.secrets["gcp_service_account"]
     except Exception:
@@ -69,7 +70,7 @@ def _extract_spreadsheet_id(maybe_url_or_id: str) -> str:
     return s
 
 # -------------------------------------------------------------
-# Funkcje OpenAI / Embeddings / Klasteryzacja
+# OpenAI / Embeddings / Klasteryzacja
 # -------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def get_openai_embeddings(texts_tuple, api_key, batch_size=256):
@@ -85,7 +86,7 @@ def get_openai_embeddings(texts_tuple, api_key, batch_size=256):
         try:
             response = client.embeddings.create(input=batch, model="text-embedding-3-large")
             all_embeddings.extend([item.embedding for item in response.data])
-            time.sleep(0.8)  # delikatny throttle
+            time.sleep(0.8)
         except Exception as e:
             st.error(f"Błąd podczas przetwarzania batcha nr {i+1}: {e}")
             return None
@@ -121,10 +122,16 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
         start = 0 if max_cluster_id == -1 else (max_cluster_id + 1)
         unique_outlier_ids = range(start, start + outlier_mask.sum())
         keywords_df.loc[outlier_mask, 'Klaster_ID'] = list(unique_outlier_ids)
+        # bezpieczne ustawienie typu logicznego (bez FutureWarning)
+        if 'Jest_Outlier' not in keywords_df.columns:
+            keywords_df['Jest_Outlier'] = pd.Series([False] * len(keywords_df), index=keywords_df.index, dtype='boolean')
+        keywords_df['Jest_Outlier'] = keywords_df['Jest_Outlier'].astype('boolean')
         keywords_df.loc[outlier_mask, 'Jest_Outlier'] = True
 
-    keywords_df['Jest_Outlier'] = keywords_df.get('Jest_Outlier', False)
-    keywords_df['Jest_Outlier'] = keywords_df['Jest_Outlier'].fillna(False)
+    # upewnij się, że kolumna istnieje i ma typ logiczny
+    if 'Jest_Outlier' not in keywords_df.columns:
+        keywords_df['Jest_Outlier'] = pd.Series([False] * len(keywords_df), index=keywords_df.index, dtype='boolean')
+    keywords_df['Jest_Outlier'] = keywords_df['Jest_Outlier'].astype('boolean').fillna(False)
 
     probabilities = clusterer.probabilities_ if hasattr(clusterer, 'probabilities_') else np.ones(len(keywords_df))
     keywords_df['Cluster_Probability'] = probabilities
@@ -134,10 +141,12 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
             return group
         keyword_col = 'Keyword' if 'Keyword' in group.columns else 'Słowo kluczowe'
         if len(group) == 1:
+            group = group.copy()
             group['HEAD_Keyword'] = group[keyword_col].iloc[0]
             group['Typ_w_klastrze'] = 'HEAD'
             group['Liczba_fraz_w_klastrze'] = 1
             return group
+        group = group.copy()
         if 'Wolumen' in group.columns:
             group['_score'] = group['Wolumen'] * (group['Cluster_Probability'] + 0.1)
             head_idx = group['_score'].idxmax()
@@ -148,50 +157,18 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
             group['Liczba_fraz_w_klastrze'] = len(group)
         return group
 
-    keywords_df = keywords_df.groupby('Klaster_ID', group_keys=False).apply(get_head_keyword)
+    keywords_df = keywords_df.groupby('Klaster_ID', group_keys=False).apply(get_head_keyword, include_groups=False)
 
     def calculate_cluster_quality(group):
         if len(group) <= 1:
             return group
+        group = group.copy()
         group['Cluster_Quality'] = group['Cluster_Probability'].mean()
         return group
 
-    keywords_df = keywords_df.groupby('Klaster_ID', group_keys=False).apply(calculate_cluster_quality)
+    keywords_df = keywords_df.groupby('Klaster_ID', group_keys=False).apply(calculate_cluster_quality, include_groups=False)
     keywords_df['Cluster_Quality'] = keywords_df.get('Cluster_Quality', 1.0)
     return keywords_df
-
-def analyze_cluster_coherence(keywords_df, embeddings):
-    if 'Klaster_ID' not in keywords_df.columns:
-        return {}
-    embeddings_array = np.array(embeddings, dtype=np.float32)
-    stats = {
-        'total_clusters': keywords_df['Klaster_ID'].nunique(),
-        'outliers': int(keywords_df['Jest_Outlier'].sum()),
-        'avg_cluster_size': float(keywords_df.groupby('Klaster_ID').size().mean()),
-        'max_cluster_size': int(keywords_df.groupby('Klaster_ID').size().max()),
-        'clusters_details': []
-    }
-    for cluster_id in keywords_df['Klaster_ID'].unique():
-        cluster_data = keywords_df[keywords_df['Klaster_ID'] == cluster_id]
-        if len(cluster_data) <= 1:
-            continue
-        cluster_indices = cluster_data.index.tolist()
-        cluster_embeddings = embeddings_array[cluster_indices]
-        similarity_matrix = util.cos_sim(
-            torch.tensor(cluster_embeddings),
-            torch.tensor(cluster_embeddings)
-        ).numpy()
-        mask = ~np.eye(similarity_matrix.shape[0], dtype=bool)
-        avg_similarity = similarity_matrix[mask].mean()
-        keyword_col = 'Keyword' if 'Keyword' in cluster_data.columns else 'Słowo kluczowe'
-        stats['clusters_details'].append({
-            'cluster_id': int(cluster_id),
-            'size': int(len(cluster_data)),
-            'avg_similarity': round(float(avg_similarity), 3),
-            'keywords': cluster_data[keyword_col].tolist()[:5],
-            'total_volume': int(cluster_data['Wolumen'].sum())
-        })
-    return stats
 
 def detect_search_intent(keyword):
     keyword_lower = keyword.lower()
@@ -207,7 +184,7 @@ def detect_search_intent(keyword):
     else:
         return 'Mieszana'
 
-# --- REKOMENDACJA GRUPOWANIA (odporna na NaN/teksty) ---
+# --- Rekomedacja grupowania + precyzja wariantów
 def _safe_int(x, default=1):
     try:
         if pd.isna(x):
@@ -224,7 +201,6 @@ def _safe_float(x, default=1.0):
     except Exception:
         return default
 
-# Normalizacja + podobieństwa leksykalne (precyzja dla wariantów)
 _PL_MAP = str.maketrans({
     "ą":"a","ć":"c","ę":"e","ł":"l","ń":"n","ó":"o","ś":"s","ż":"z","ź":"z",
     "Ą":"a","Ć":"c","Ę":"e","Ł":"l","Ń":"n","Ó":"o","Ś":"s","Ż":"z","Ź":"z"
@@ -254,10 +230,8 @@ def _reco(row: pd.Series) -> str:
     qual_ = _safe_float(row.get('Cluster_Quality', np.nan), default=1.0)
     kw = str(row.get('Słowo kluczowe', '') or '')
     head = str(row.get('HEAD_Keyword', kw) or '')
-
     s_lex = _lexical_sim(kw, head)
     s_jac = _jaccard_tokens(kw, head)
-
     if max(s_lex, s_jac) >= 0.88:
         return "Jeden artykuł"
     if size_ >= 4 and qual_ >= 0.60:
@@ -267,10 +241,6 @@ def _reco(row: pd.Series) -> str:
     return "Do decyzji"
 
 def classify_article_type(keyword: str, cluster_size: int, intent: str) -> str:
-    """
-    Zwraca typ treści: 'Ranking/Lista', 'Porównanie', 'Poradnik/How-to',
-    'Definicja/Co to jest', 'Recenzja/Opinie', 'Temat ogólny'.
-    """
     k = (keyword or "").lower()
     if any(x in k for x in ["ranking", "najlepsze", "top ", "top-", "top_", "top10", "top 10", "polecane", "lista", "zestawienie"]):
         return "Ranking/Lista"
@@ -306,15 +276,21 @@ def calculate_priority_score(row):
 
 def compute_priority_bucket(series: pd.Series) -> pd.Series:
     """
-    Zamienia Priorytet_Score na 1..10 (1 = najwyższy), stabilnie nawet przy duplikatach/małych próbach.
+    Zwraca priorytet 1..10 (1 = najwyższy). Bez NaN — braki dostają 10.
     """
-    n = int(series.shape[0])
+    s = pd.to_numeric(series, errors='coerce')
+    n = int(s.shape[0])
+    result = pd.Series(10, index=series.index, dtype='int64')  # domyślnie 10
     if n == 0:
-        return series
-    ranks = series.rank(method="first", ascending=False)  # 1..n (1 = najwyższy score)
-    step = max(n / 10.0, 1.0)
-    buckets = np.ceil(ranks / step).astype(int)          # 1..10
-    return buckets.clip(1, 10)
+        return result
+    mask = s.notna()
+    if mask.sum() == 0:
+        return result
+    ranks = s[mask].rank(method="first", ascending=False)  # 1..k
+    step = max(mask.sum() / 10.0, 1.0)
+    buckets = np.ceil(ranks / step).astype(int).clip(1, 10)
+    result.loc[mask] = buckets.values
+    return result
 
 def find_first_competitor_url(row):
     for col in row.index:
@@ -333,11 +309,11 @@ Dane wejściowe:
 - Artykuł konkurencji (tylko inspiracja kontekstu): {competitor_url}
 
 Zasady:
-1) Każdy tytuł MUSI zawierać dokładnie frazę: "{keyword}" (bez modyfikacji i literówek).
+1) Każdy tytuł MUSI zawierać dokładnie frazę: "{keyword}".
 2) Styl informacyjny/poradnikowy: „co to jest…”, „jak…”, „poradnik…”, „ranking…”, „porównanie…” — dobierz naturalnie do intencji.
-3) Pisownia zgodna z PL. Unikaj dwukropków; używaj myślnika.
-4) Nie wprowadzaj nowych wariantów nazwy własnej/branda; nie poprawiaj frazy wejściowej.
-5) Zwróć WYŁĄCZNIE listę numerowaną 1..3 z 3 różnymi propozycjami.
+3) Pisownia PL. Unikaj dwukropków; używaj myślnika.
+4) Nie poprawiaj branda/odmian słowa kluczowego.
+5) Zwróć WYŁĄCZNIE listę numerowaną 1..3.
 """
     for attempt in range(max_retries):
         try:
@@ -352,22 +328,17 @@ Zasady:
             )
             content = response.choices[0].message.content
             titles = re.findall(r'\d+\.\s*(.*)', content)
-
             _kw = str(keyword).strip()
             _kw_low = _kw.lower()
             _clean = []
             for t in (titles[:3] if titles else []):
                 t = (t or "").strip()
                 if _kw_low not in t.lower():
-                    if t:
-                        t = f"{t} — {_kw}"
-                    else:
-                        t = f"{_kw} — co to jest i jak działa?"
+                    t = f"{t} — {_kw}" if t else f"{_kw} — co to jest i jak działa?"
                 _clean.append(t)
             while len(_clean) < 3:
                 _clean.append(f"{_kw} — poradnik dla początkujących")
             return _clean[:3]
-
         except Exception as e:
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
@@ -395,10 +366,6 @@ def export_df_to_google_sheets_with_colors(
     existing_spreadsheet_id_or_url: str = "",
     folder_id: str = ""
 ):
-    """
-    Jeśli podasz existing_spreadsheet_id_or_url -> zapisze do tego pliku (tworzy/aktualizuje zakładkę 'Plan').
-    W przeciwnym razie spróbuje utworzyć nowy plik (jeśli podano folder_id, to w tym folderze).
-    """
     gc = _get_gspread_client()
     if gc is None:
         return None
@@ -418,7 +385,6 @@ def export_df_to_google_sheets_with_colors(
         st.error(f"Nie można otworzyć/utworzyć Spreadsheet: {e}")
         return None
 
-    # Worksheet "Plan"
     try:
         try:
             ws = sh.worksheet("Plan")
@@ -429,7 +395,6 @@ def export_df_to_google_sheets_with_colors(
         st.error(f"Problem z arkuszem 'Plan': {e}")
         return None
 
-    # Dane
     try:
         data = df[columns_in_order].copy()
         data = data.replace([np.inf, -np.inf], np.nan)
@@ -439,7 +404,6 @@ def export_df_to_google_sheets_with_colors(
         st.error(f"Nie udało się zaktualizować danych w arkuszu: {e}")
         return None
 
-    # Formatowanie warunkowe wg 'Status'
     try:
         n_rows = data.shape[0] + 1
         n_cols = data.shape[1]
@@ -479,16 +443,12 @@ def export_df_to_google_sheets_with_colors(
                     "rule": {
                         "ranges": [table_range],
                         "booleanRule": {
-                            "condition": {
-                                "type": "CUSTOM_FORMULA",
-                                "values": [
-                                    {"userEnteredValue": f"={base_cell}=\"Nowy temat\""}
-                                ]
+                            "condition": {"type": "CUSTOM_FORMULA",
+                                "values": [{"userEnteredValue": f"={base_cell}=\"Nowy temat\""}]
                             },
                             "format": {"backgroundColor": col_green}
                         }
-                    },
-                    "index": 0
+                    }, "index": 0
                 }
             },
             {
@@ -496,16 +456,12 @@ def export_df_to_google_sheets_with_colors(
                     "rule": {
                         "ranges": [table_range],
                         "booleanRule": {
-                            "condition": {
-                                "type": "TEXT_CONTAINS",
-                                "values": [
-                                    {"userEnteredValue": "TOP1"}
-                                ]
+                            "condition": {"type": "TEXT_CONTAINS",
+                                "values": [{"userEnteredValue": "TOP1"}]
                             },
                             "format": {"backgroundColor": col_orange}
                         }
-                    },
-                    "index": 0
+                    }, "index": 0
                 }
             },
             {
@@ -513,16 +469,12 @@ def export_df_to_google_sheets_with_colors(
                     "rule": {
                         "ranges": [table_range],
                         "booleanRule": {
-                            "condition": {
-                                "type": "TEXT_CONTAINS",
-                                "values": [
-                                    {"userEnteredValue": "Nie rankuje"}
-                                ]
+                            "condition": {"type": "TEXT_CONTAINS",
+                                "values": [{"userEnteredValue": "Nie rankuje"}]
                             },
                             "format": {"backgroundColor": col_red}
                         }
-                    },
-                    "index": 0
+                    }, "index": 0
                 }
             }
         ]
@@ -536,13 +488,14 @@ def export_df_to_google_sheets_with_colors(
 # -------------------------------------------------------------
 # UI
 # -------------------------------------------------------------
-st.title("🚀 Planer Treści SEO [Wersja HDBSCAN v9 - ULTIMATE]")
-st.markdown("✨ Zaawansowana klasteryzacja z HDBSCAN, analiza intencji, agenda priorytetów 1–10 oraz propozycje formatów treści.")
+st.title("🚀 Planer Treści SEO [Wersja HDBSCAN v10]")
+st.markdown("✨ Klasteryzacja HDBSCAN, analiza intencji, priorytety 1–10, **checkboxy do wyboru fraz**, backlog CSV do kolejnych analiz.")
 
 col1, col2 = st.columns(2)
 with col1:
     st.header("1. Konfiguracja")
-    num_to_generate = st.number_input("Liczba nowych artykułów do wygenerowania", min_value=1, value=20)
+    gen_mode = st.radio("Tryb generowania tytułów", ["Automatycznie (TOP N)", "Ręcznie (checkboxy)"])
+    num_to_generate = st.number_input("TOP N (dla trybu automatycznego)", min_value=1, value=20)
     similarity_threshold = st.slider("Próg podobieństwa dla optymalizacji", min_value=0.7, max_value=1.0, value=0.8, step=0.01)
 
     with st.expander("⚙️ Zaawansowane ustawienia klasteryzacji"):
@@ -554,24 +507,17 @@ with col1:
 
 with col2:
     st.header("2. Wgraj pliki CSV")
-    content_gap_file = st.file_uploader("1. Wgraj plik CSV z analizą Content Gap", type="csv")
-    my_articles_file = st.file_uploader("2. Wgraj plik CSV z listą swoich artykułów", type="csv")
-    ranking_file = st.file_uploader("3. Wgraj plik CSV z aktualnym rankingiem", type="csv")
+    content_gap_file = st.file_uploader("1. Content Gap CSV", type="csv")
+    my_articles_file = st.file_uploader("2. Twoje artykuły CSV", type="csv")
+    ranking_file = st.file_uploader("3. Ranking CSV", type="csv")
+    backlog_file = st.file_uploader("4. (Opcjonalnie) Backlog/Historia CSV (kolumny: 'Słowo kluczowe', 'Wyklucz_następnym_razem')", type="csv")
 
-# Pola dla eksportu (używane też przez test połączenia)
+# Eksport do Sheets
 st.markdown("### ☁️ Ustawienia eksportu do Google Sheets")
-existing_sheet_input = st.text_input(
-    "Istniejący Spreadsheet (URL lub ID) – zalecane, gdy brakuje miejsca w Drive",
-    value="",
-    key="existing_spreadsheet_id"
-)
-target_folder_id = st.text_input(
-    "Opcjonalnie: Folder ID (jeśli chcesz tworzyć nowe pliki w konkretnym folderze z wolnym miejscem)",
-    value="",
-    key="target_folder_id"
-)
+existing_sheet_input = st.text_input("Istniejący Spreadsheet (URL lub ID)", value="", key="existing_spreadsheet_id")
+target_folder_id = st.text_input("Opcjonalnie: Folder ID (dla nowych plików)", value="", key="target_folder_id")
 
-# --- PRZYCISK TESTOWY: szybkie sprawdzenie połączenia i uprawnień ---
+# Test połączenia
 if st.button("🔍 Test połączenia z Google Sheets (A1 -> timestamp)", key="gs_probe"):
     try:
         gc = _get_gspread_client()
@@ -579,7 +525,7 @@ if st.button("🔍 Test połączenia z Google Sheets (A1 -> timestamp)", key="gs
             st.stop()
         sheet_id_or_url = existing_sheet_input.strip()
         if not sheet_id_or_url:
-            st.error("Podaj najpierw Istniejący Spreadsheet (URL lub ID), aby wykonać test.")
+            st.error("Podaj URL/ID Spreadsheet, aby wykonać test.")
         else:
             spreadsheet_id = _extract_spreadsheet_id(sheet_id_or_url)
             sh = gc.open_by_key(spreadsheet_id)
@@ -607,9 +553,30 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         st.warning("Upewnij się, że wgrałeś wszystkie trzy pliki CSV.")
         st.stop()
 
+    # Backlog: przygotuj zbiór fraz do pominięcia
+    skip_set = set()
+    if backlog_file is not None:
+        try:
+            df_backlog = pd.read_csv(backlog_file)
+            if 'Słowo kluczowe' in df_backlog.columns:
+                mask = False
+                for col in df_backlog.columns:
+                    if str(col).lower().strip() in ["wyklucz_następnym_razem", "wyklucz", "skip", "zrealizowano", "wygenerowano_tytuł"]:
+                        mask = mask | df_backlog[col].astype(str).str.lower().isin(['true', '1', 'tak', 'yes'])
+                if isinstance(mask, (pd.Series, np.ndarray)) is False:
+                    mask = df_backlog.get('Wyklucz_następnym_razem', False)
+                skip_set = set(df_backlog.loc[mask, 'Słowo kluczowe'].astype(str).str.lower().tolist())
+                if len(skip_set) > 0:
+                    st.info(f"Z backloga pomijam {len(skip_set)} fraz przy tej analizie.")
+        except Exception as e:
+            st.warning(f"Nie udało się wczytać backloga: {e}")
+
     with st.spinner("Przeprowadzam analizę..."):
         try:
-            df_gap = pd.read_csv(content_gap_file).dropna(subset=['Keyword']).astype({'Keyword': str})
+            df_gap_raw = pd.read_csv(content_gap_file).dropna(subset=['Keyword']).astype({'Keyword': str})
+            # odfiltruj frazy oznaczone do pominięcia
+            df_gap = df_gap_raw[~df_gap_raw['Keyword'].str.lower().isin(skip_set)].copy()
+
             df_articles = pd.read_csv(my_articles_file)
             df_ranking = pd.read_csv(ranking_file)
 
@@ -633,7 +600,7 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
             if position_col:
                 df_ranking[position_col] = pd.to_numeric(df_ranking[position_col], errors='coerce').fillna(0).astype(int)
 
-            st.info(f"Wczytano {len(df_gap)} słów kluczowych, {len(df_articles)} artykułów i {len(df_ranking)} rankingowych słów kluczowych.")
+            st.info(f"Wczytano {len(df_gap)} słów (po odfiltrowaniu backloga), {len(df_articles)} artykułów i {len(df_ranking)} pozycji rankingu.")
         except Exception as e:
             st.error(f"Błąd podczas wczytywania plików CSV: {e}")
             st.stop()
@@ -649,7 +616,8 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         keywords_for_semantic_check = []
 
         for _, row in df_gap.iterrows():
-            keyword_lower = str(row['Keyword']).lower()
+            kw_raw = str(row['Keyword'])
+            keyword_lower = kw_raw.lower()
             if keyword_lower in ranking_map:
                 rank_data = ranking_map[keyword_lower]
                 position = int(rank_data['position'])
@@ -664,7 +632,7 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 else:
                     status = f'Do optymalizacji (Poz. {int(position)} → TOP20)'
                 results.append({
-                    'Słowo kluczowe': row['Keyword'],
+                    'Słowo kluczowe': kw_raw,
                     'Wolumen': int(row.get('Volume', row.get('Wolumen', 0)) or 0),
                     'Status': status,
                     'Akcja / Dopasowany URL': rank_data['url'],
@@ -672,14 +640,13 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                     'Aktualna_pozycja': position
                 })
             else:
-                keywords_for_semantic_check.append(row.to_dict())
+                if keyword_lower not in skip_set:
+                    keywords_for_semantic_check.append(row.to_dict())
 
-        st.info(f"{len(results)} słów zmapowano na podstawie rankingu. Pozostało {len(keywords_for_semantic_check)} do analizy semantycznej.")
+        st.info(f"{len(results)} słów zmapowano na podstawie rankingu. Pozostało {len(keywords_for_semantycznej := keywords_for_semantic_check)} do analizy semantycznej.")
 
-        cluster_stats = None
-
-        if keywords_for_semantic_check:
-            df_semantic = pd.DataFrame(keywords_for_semantic_check)
+        if keywords_for_semantycznej:
+            df_semantic = pd.DataFrame(keywords_for_semantycznej)
             if 'Volume' in df_semantic.columns and 'Wolumen' not in df_semantic.columns:
                 df_semantic['Wolumen'] = df_semantic['Volume']
             elif 'Wolumen' not in df_semantic.columns:
@@ -707,7 +674,6 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                     df_semantic, query_embeddings,
                     min_cluster_size=min_cluster_size, min_samples=min_samples
                 )
-                cluster_stats = analyze_cluster_coherence(df_semantic, query_embeddings)
 
             cosine_scores = util.cos_sim(torch.tensor(query_embeddings), torch.tensor(corpus_embeddings))
             semantic_records = df_semantic.to_dict('records')
@@ -754,265 +720,160 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
 
         df_results = pd.DataFrame(results)
 
-        # Agenda: score → bucket 1..10
+        # Priorytet 1..10 (bez NaN)
         df_results['Priorytet_Score'] = df_results.apply(calculate_priority_score, axis=1)
-        df_results['Priorytet'] = compute_priority_bucket(df_results['Priorytet_Score']).astype('Int64')
+        df_results['Priorytet'] = compute_priority_bucket(df_results['Priorytet_Score'])
 
-        # HEAD jako nazwa grupy tematycznej
-        if 'HEAD_Keyword' in df_results.columns:
-            df_results['Grupa_tematyczna'] = df_results['HEAD_Keyword']
-        else:
-            df_results['Grupa_tematyczna'] = df_results['Słowo kluczowe']
+        # Grupa tematyczna
+        df_results['Grupa_tematyczna'] = df_results['HEAD_Keyword'] if 'HEAD_Keyword' in df_results.columns else df_results['Słowo kluczowe']
 
-        # --- Ujednolicenie typów i uzupełnienie braków (zawsze) ---
+        # Typy i brakujące wartości
         force_int_cols = ['Wolumen', 'Aktualna_pozycja', 'Liczba_fraz_w_klastrze', 'Klaster_ID', 'Priorytet']
         for c in force_int_cols:
             if c in df_results.columns:
                 df_results[c] = pd.to_numeric(df_results[c], errors='coerce').fillna(0).astype(int)
-
         force_float_cols = ['Podobieństwo', 'Cluster_Probability', 'Cluster_Quality', 'Priorytet_Score']
         for c in force_float_cols:
             if c in df_results.columns:
-                df_results[c] = pd.to_numeric(df_results[c], errors='coerce')
-                df_results[c] = df_results[c].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
+                df_results[c] = pd.to_numeric(df_results[c], errors='coerce').replace([np.inf, -np.inf], np.nan).fillna(0.0)
         if 'Jest_Outlier' in df_results.columns:
-            df_results['Jest_Outlier'] = df_results['Jest_Outlier'].fillna(False).astype(bool)
+            df_results['Jest_Outlier'] = pd.Series(df_results['Jest_Outlier'], dtype='boolean').fillna(False)
 
         obj_cols = df_results.select_dtypes(include=['object']).columns
         df_results[obj_cols] = df_results[obj_cols].fillna('-')
 
-        # Rekomendacja grupowania (po czyszczeniu typów)
+        # Rekomendacja grupowania
         df_results['Rekomendacja_grupowania'] = df_results.apply(_reco, axis=1)
 
-        # ===== Generowanie tytułów dla TOP N nowych tematów (HEAD) =====
-        if enable_clustering:
-            df_new_topics = df_results[
-                (df_results['Status'] == 'Nowy temat') &
-                (df_results['Typ_w_klastrze'] == 'HEAD')
-            ].copy()
-        else:
-            df_new_topics = df_results[df_results['Status'] == 'Nowy temat'].copy()
-
-        if not df_new_topics.empty:
-            df_to_process = df_new_topics.sort_values(by='Priorytet_Score', ascending=False).head(num_to_generate)
-            st.info(f"Generuję propozycje tytułów dla {len(df_to_process)} najważniejszych nowych tematów...")
-            df_gap_indexed = df_gap.set_index('Keyword')
-            df_to_process['Competitor URL'] = df_to_process['Słowo kluczowe'].map(
-                df_gap_indexed.apply(find_first_competitor_url, axis=1)
-            )
-            progress_bar = st.progress(0, text="Generowanie tytułów (GPT-4o)...")
-            generated_titles_data = []
-            for i, (idx, row) in enumerate(df_to_process.iterrows()):
-                related_keywords = ""
-                if enable_clustering and row.get('Liczba_fraz_w_klastrze', 1) > 1:
-                    related = df_results[
-                        (df_results['Klaster_ID'] == row['Klaster_ID']) &
-                        (df_results['Typ_w_klastrze'] == 'RELATED')
-                    ]['Słowo kluczowe'].tolist()
-                    related_keywords = ", ".join(related[:5])
-                titles = generate_titles(
-                    openai_api_key,
-                    row['Słowo kluczowe'],
-                    row['Wolumen'],
-                    row.get('Competitor URL', 'Brak'),
-                    related_keywords
-                )
-                generated_titles_data.append({
-                    'Słowo kluczowe': row['Słowo kluczowe'],
-                    'Propozycja_tematu_1': titles[0],
-                    'Propozycja_tematu_2': titles[1],
-                    'Propozycja_tematu_3': titles[2]
-                })
-                progress_bar.progress((i + 1) / len(df_to_process), text=f"Generowanie tytułów ({i+1}/{len(df_to_process)})")
-            if generated_titles_data:
-                df_titles = pd.DataFrame(generated_titles_data)
-                df_results = pd.merge(df_results, df_titles, on='Słowo kluczowe', how='left')
-
-                # PODGLĄD „TOP N – propozycje tytułów”
-                with st.expander(f"📝 Propozycje tytułów (TOP {len(df_to_process)})", expanded=True):
-                    preview_cols = ['Słowo kluczowe', 'Wolumen',
-                                    'Propozycja_tematu_1', 'Propozycja_tematu_2', 'Propozycja_tematu_3']
-                    _titles_preview = df_results.loc[
-                        df_results['Słowo kluczowe'].isin(df_to_process['Słowo kluczowe'])
-                    ][preview_cols].sort_values('Wolumen', ascending=False)
-                    st.dataframe(_titles_preview, use_container_width=True)
-        # ================================================================
+        # Kolumny workflow
+        df_results['Wybrane_do_tytułów'] = False
+        df_results['Wyklucz_następnym_razem'] = False
+        df_results['Wygenerowano_tytuł'] = False
 
         st.success("✅ Analiza zakończona!")
 
-        # Szybkie metryki
-        colm1, colm2, colm3, colm4 = st.columns(4)
-        with colm1:
-            st.metric("Nowe tematy", len(df_results[df_results['Status'] == 'Nowy temat']))
-        with colm2:
-            st.metric("Do optymalizacji", len(df_results[df_results['Status'].str.contains('optymalizacji', na=False)]))
-        with colm3:
-            if enable_clustering and 'Klaster_ID' in df_results.columns:
-                st.metric("Liczba klastrów", df_results['Klaster_ID'].nunique())
-        with colm4:
-            st.metric("Średni Priorytet (1=best)", f"{df_results['Priorytet'].mean():.1f}")
+        # Widok i sortowanie
+        df_results_sorted = df_results.sort_values(by=['Priorytet', 'Priorytet_Score', 'Wolumen'], ascending=[True, False, False])
 
-        st.header("📊 Wyniki Analizy i Plan Treści")
+        show_advanced = st.checkbox("Pokaż metryki techniczne (HDBSCAN, outliery, prawdopodobieństwo)", value=False, key="show_adv")
 
-        # Sort: najpierw agenda (1..10), potem score i wolumen
-        df_results_sorted = df_results.sort_values(
-            by=['Priorytet', 'Priorytet_Score', 'Wolumen'],
-            ascending=[True, False, False]
-        )
-
-        # Widok domyślny – biznesowy
-        show_advanced = st.checkbox(
-            "Pokaż metryki techniczne (HDBSCAN, outliery, prawdopodobieństwo)",
-            value=False,
-            key="show_adv"
-        )
-
-        # =================== (wewnątrz if-button) ===================
         cols_order = [
-            'Priorytet',
-            'Słowo kluczowe', 'Wolumen', 'Status',
+            'Priorytet', 'Słowo kluczowe', 'Wolumen', 'Status',
             'Grupa_tematyczna', 'Typ_artykułu', 'Rekomendacja_grupowania',
             'Akcja / Dopasowany URL', 'Najbliższy_artykuł', 'Podobieństwo',
-            'Intencja', 'Aktualna_pozycja'
+            'Intencja', 'Aktualna_pozycja',
+            'Wybrane_do_tytułów', 'Wygenerowano_tytuł', 'Wyklucz_następnym_razem'
         ]
         if show_advanced:
             cols_order.extend([
                 'Klaster_ID', 'HEAD_Keyword', 'Typ_w_klastrze', 'Liczba_fraz_w_klastrze',
-                'Frazy_w_klastrze_TOP5',
                 'Jest_Outlier', 'Cluster_Probability', 'Cluster_Quality', 'Priorytet_Score'
             ])
-        cols_order.extend(['Propozycja_tematu_1', 'Propozycja_tematu_2', 'Propozycja_tematu_3'])
-        # ============================================================
 
-        existing_cols = [c for c in cols_order if c in df_results_sorted.columns]
-
-        def highlight_rows(row):
-            s = str(row['Status'])
-            if s == 'Nowy temat':
-                return ['background-color: #e8f5e9'] * len(row)
-            elif 'TOP1' in s:
-                return ['background-color: #fff3e0'] * len(row)
-            elif 'Nie rankuje' in s:
-                return ['background-color: #ffebee'] * len(row)
-            return [''] * len(row)
-
-        # Przygotuj wersję do WYŚWIETLENIA
-        display_df = df_results_sorted.copy()
-
-        # Frazy_w_klastrze_TOP5 (podgląd – budujemy tu, by mieć pełny set)
-        if enable_clustering and 'Klaster_ID' in display_df.columns and 'Frazy_w_klastrze_TOP5' not in display_df.columns:
-            top5_map = {}
-            for cid, g in display_df.groupby('Klaster_ID'):
-                try:
-                    gg = g.sort_values('Wolumen', ascending=False)
-                except Exception:
-                    gg = g
-                top5_map[cid] = ", ".join(gg['Słowo kluczowe'].tolist()[:5])
-            display_df['Frazy_w_klastrze_TOP5'] = display_df['Klaster_ID'].map(top5_map).fillna('-')
-        elif 'Frazy_w_klastrze_TOP5' not in display_df.columns:
-            display_df['Frazy_w_klastrze_TOP5'] = '-'
-
-        if 'Jest_Outlier' in display_df.columns:
-            display_df['Jest_Outlier'] = display_df['Jest_Outlier'].map({True: 'TAK', False: ''})
-
-        _obj_cols = display_df.select_dtypes(include=['object']).columns
-        display_df[_obj_cols] = display_df[_obj_cols].fillna('-')
-
-        # Zapisz do session_state, żeby nie znikło po kliknięciu innych przycisków
-        st.session_state["plan_df"] = display_df.copy()
-        st.session_state["plan_cols"] = existing_cols[:]
-
-        st.dataframe(
-            display_df[existing_cols].style.apply(highlight_rows, axis=1),
-            width='stretch',
-            height=600
+        # === Edytowalna tabela z checkboxami ===
+        st.subheader("📋 Plan – wybierz frazy checkboxem lub użyj trybu automatycznego")
+        edit_cols = [c for c in cols_order if c in df_results_sorted.columns]
+        column_config = {
+            "Wybrane_do_tytułów": st.column_config.CheckboxColumn("Wybrane_do_tytułów", help="Zaznacz frazy do wygenerowania tytułów"),
+            "Wyklucz_następnym_razem": st.column_config.CheckboxColumn("Wyklucz_następnym_razem", help="Omiń przy kolejnej analizie"),
+            "Wygenerowano_tytuł": st.column_config.CheckboxColumn("Wygenerowano_tytuł", disabled=True, help="Ustawiane automatycznie po generacji")
+        }
+        edited_df = st.data_editor(
+            df_results_sorted[edit_cols],
+            use_container_width=True,
+            num_rows="dynamic",
+            column_config=column_config,
+            hide_index=True
         )
 
-        st.markdown("""
-**Legenda i wskazówki:**
-- **Priorytet**: 1 = najwyższy, 10 = najniższy (agenda działań).
-- **Grupa tematyczna**: nazwa przewodnia (HEAD) dla całego klastra.
-- **Rekomendacja grupowania**:
-  - *Jeden artykuł* – frazy są spójne; zaplanuj jeden, mocny materiał.
-  - *Osobne wpisy* – frazy się rozchodzą; rozbij na kilka treści.
-  - *Do decyzji* – spójność umiarkowana; zależy od strategii i zasobów.
-- 🟢 Zielony wiersz: Nowy temat
-- 🟠 Pomarańczowy: Blisko TOP1 (optymalizacja)
-- 🔴 Czerwony: Nie rankuje
-""")
+        # ======= GENEROWANIE TYTUŁÓW =======
+        st.subheader("📝 Generowanie tytułów")
+        if gen_mode == "Automatycznie (TOP N)":
+            if st.button("Generuj tytuły – tryb automatyczny (TOP N)"):
+                if enable_clustering and 'Typ_w_klastrze' in edited_df.columns:
+                    candidates = edited_df[(edited_df['Status'] == 'Nowy temat') & (edited_df['Typ_w_klastrze'] == 'HEAD')].copy()
+                else:
+                    candidates = edited_df[edited_df['Status'] == 'Nowy temat'].copy()
+                to_process = candidates.sort_values('Priorytet_Score', ascending=False).head(int(num_to_generate))
 
-        # Eksport CSV (natychmiast)
-        csv_buffer = io.StringIO()
-        display_df[existing_cols].to_csv(csv_buffer, index=False, encoding='utf-8')
-        csv_bytes = csv_buffer.getvalue().encode('utf-8-sig')
-        st.download_button(
-            "📥 Pobierz gotowy plan treści jako CSV",
-            csv_bytes,
-            "plan_tresci_hdbscan_ultimate.csv",
-            "text/csv",
-            type="primary"
-        )
+                df_gap_indexed = df_gap_raw.set_index('Keyword')
+                gen_rows = []
+                progress = st.progress(0.0, text="Generowanie…")
+                for i, (_, r) in enumerate(to_process.iterrows()):
+                    related_keywords = ""
+                    if enable_clustering and 'Klaster_ID' in edited_df.columns and 'Typ_w_klastrze' in edited_df.columns:
+                        related = edited_df[(edited_df['Klaster_ID'] == r.get('Klaster_ID')) & (edited_df['Typ_w_klastrze'] == 'RELATED')]['Słowo kluczowe'].tolist() if 'Typ_w_klastrze' in edited_df.columns else []
+                        related_keywords = ", ".join(related[:5])
+                    comp_url = find_first_competitor_url(df_gap_indexed.loc[r['Słowo kluczowe']]) if r['Słowo kluczowe'] in df_gap_indexed.index else "Brak"
+                    titles = generate_titles(openai_api_key, r['Słowo kluczowe'], r['Wolumen'], comp_url, related_keywords)
+                    gen_rows.append((r['Słowo kluczowe'], titles))
+                    progress.progress((i+1)/max(len(to_process),1), text=f"Generowanie ({i+1}/{len(to_process)})")
 
-        # Dodatkowe eksporty
-        colx1, colx2 = st.columns(2)
-        with colx1:
-            if 'Typ_w_klastrze' in df_results_sorted.columns:
-                df_head_only = df_results_sorted[df_results_sorted['Typ_w_klastrze'] == 'HEAD']
-                csv_head_buffer = io.StringIO()
-                df_head_only[existing_cols].to_csv(csv_head_buffer, index=False, encoding='utf-8')
-                csv_head_bytes = csv_head_buffer.getvalue().encode('utf-8-sig')
-                st.download_button(
-                    "📥 Pobierz tylko HEAD keywords",
-                    csv_head_bytes,
-                    "plan_tresci_head_only.csv",
-                    "text/csv"
-                )
-        with colx2:
-            df_priority = df_results_sorted[df_results_sorted['Status'] == 'Nowy temat'].head(50)
-            csv_priority_buffer = io.StringIO()
-            df_priority[existing_cols].to_csv(csv_priority_buffer, index=False, encoding='utf-8')
-            csv_priority_bytes = csv_priority_buffer.getvalue().encode('utf-8-sig')
-            st.download_button(
-                "📥 Pobierz TOP 50 priorytetów",
-                csv_priority_bytes,
-                "plan_tresci_top50.csv",
-                "text/csv"
-            )
+                ed = edited_df.set_index('Słowo kluczowe').copy()
+                for kw, titles in gen_rows:
+                    for j, col in enumerate(['Propozycja_tematu_1','Propozycja_tematu_2','Propozycja_tematu_3']):
+                        ed.loc[kw, col] = titles[j]
+                    ed.loc[kw, 'Wygenerowano_tytuł'] = True
+                    ed.loc[kw, 'Wyklucz_następnym_razem'] = True
 
-        # Dodatkowa analiza
-        st.header("📊 Dodatkowa Analiza")
-        tab1, tab2, tab3 = st.tabs(["Rozkład intencji", "Analiza wolumenu", "Jakość klastrów"])
-        with tab1:
-            if 'Intencja' in df_results.columns:
-                intent_counts = df_results['Intencja'].value_counts()
-                st.bar_chart(intent_counts)
-                st.markdown("**Interpretacja:** Dominująca intencja wyszukiwania w analizowanych frazach.")
-        with tab2:
-            volume_by_status = df_results.groupby('Status')['Wolumen'].sum().sort_values(ascending=False)
-            st.bar_chart(volume_by_status)
-            st.markdown("**Interpretacja:** Łączny potencjał ruchu dla każdej kategorii statusu.")
-        with tab3:
-            if enable_clustering and 'Cluster_Quality' in df_results.columns and 'Typ_w_klastrze' in df_results.columns:
-                quality_dist = pd.to_numeric(
-                    df_results.loc[df_results['Typ_w_klastrze'] == 'HEAD', 'Cluster_Quality'],
-                    errors='coerce'
-                ).dropna()
-                if not quality_dist.empty:
-                    st.line_chart(quality_dist.sort_values(ascending=False))
-                    st.markdown(f"**Średnia jakość klastrów:** {quality_dist.mean():.3f}")
-                weak_clusters = df_results[
-                    (df_results['Typ_w_klastrze'] == 'HEAD') &
-                    (pd.to_numeric(df_results['Cluster_Quality'], errors='coerce') < 0.5)
-                ]['Słowo kluczowe'].dropna().tolist()
-                if weak_clusters:
-                    st.warning(f"⚠️ Znaleziono {len(weak_clusters)} klastrów o niskiej spójności. Rozważ ich weryfikację ręczną.")
-                    with st.expander("Zobacz listę"):
-                        for kw in weak_clusters[:10]:
-                            st.markdown(f"- {kw}")
+                edited_df = ed.reset_index()
+                st.success("Tytuły wygenerowane (tryb automatyczny). Przewiń tabelę by zobaczyć kolumny z propozycjami.")
+        else:
+            if st.button("Generuj tytuły – dla zaznaczonych checkboxem"):
+                selected = edited_df[(edited_df['Wybrane_do_tytułów'] == True) & (edited_df['Status'] == 'Nowy temat')].copy()
+                if selected.empty:
+                    st.warning("Nie zaznaczono żadnych fraz (muszą mieć Status = 'Nowy temat').")
+                else:
+                    df_gap_indexed = df_gap_raw.set_index('Keyword')
+                    gen_rows = []
+                    progress = st.progress(0.0, text="Generowanie…")
+                    for i, (_, r) in enumerate(selected.iterrows()):
+                        related_keywords = ""
+                        if enable_clustering and 'Klaster_ID' in edited_df.columns and 'Typ_w_klastrze' in edited_df.columns:
+                            related = edited_df[(edited_df['Klaster_ID'] == r.get('Klaster_ID')) & (edited_df['Typ_w_klastrze'] == 'RELATED')]['Słowo kluczowe'].tolist() if 'Typ_w_klastrze' in edited_df.columns else []
+                            related_keywords = ", ".join(related[:5])
+                        comp_url = find_first_competitor_url(df_gap_indexed.loc[r['Słowo kluczowe']]) if r['Słowo kluczowe'] in df_gap_indexed.index else "Brak"
+                        titles = generate_titles(openai_api_key, r['Słowo kluczowe'], r['Wolumen'], comp_url, related_keywords)
+                        gen_rows.append((r['Słowo kluczowe'], titles))
+                        progress.progress((i+1)/max(len(selected),1), text=f"Generowanie ({i+1}/{len(selected)})")
+
+                    ed = edited_df.set_index('Słowo kluczowe').copy()
+                    for kw, titles in gen_rows:
+                        for j, col in enumerate(['Propozycja_tematu_1','Propozycja_tematu_2','Propozycja_tematu_3']):
+                            ed.loc[kw, col] = titles[j]
+                        ed.loc[kw, 'Wygenerowano_tytuł'] = True
+                        ed.loc[kw, 'Wyklucz_następnym_razem'] = True
+                    edited_df = ed.reset_index()
+                    st.success("Tytuły wygenerowane (tryb ręczny).")
+
+        # ====== Wyświetl wynikową tabelę (po ewentualnej generacji) ======
+        for col in ['Propozycja_tematu_1','Propozycja_tematu_2','Propozycja_tematu_3']:
+            if col not in edited_df.columns:
+                edited_df[col] = '-'
+
+        st.subheader("📊 Podsumowanie (po generowaniu)")
+        summary_cols = [
+            'Priorytet','Słowo kluczowe','Wolumen','Status',
+            'Typ_artykułu','Rekomendacja_grupowania',
+            'Propozycja_tematu_1','Propozycja_tematu_2','Propozycja_tematu_3',
+            'Wyklucz_następnym_razem','Wygenerowano_tytuł'
+        ]
+        final_df = edited_df.copy()
+        st.dataframe(final_df[summary_cols + [c for c in ['Grupa_tematyczna','Akcja / Dopasowany URL','Podobieństwo','Intencja','Aktualna_pozycja'] if c in final_df.columns]], use_container_width=True)
+
+        # Zapis do session_state dla eksportów
+        st.session_state["plan_df"] = final_df.copy()
+        base_export_cols = [
+            'Priorytet','Słowo kluczowe','Wolumen','Status',
+            'Grupa_tematyczna','Typ_artykułu','Rekomendacja_grupowania',
+            'Akcja / Dopasowany URL','Najbliższy_artykuł','Podobieństwo','Intencja','Aktualna_pozycja',
+            'Propozycja_tematu_1','Propozycja_tematu_2','Propozycja_tematu_3',
+            'Wybrane_do_tytułów','Wygenerowano_tytuł','Wyklucz_następnym_razem'
+        ]
+        st.session_state["plan_cols"] = [c for c in base_export_cols if c in final_df.columns]
 
 # =========================================
-# STAŁA SEKCJA EKSPORTU / POBIERANIA (poza analizą)
+# STAŁA SEKCJA EKSPORTU / POBIERANIA
 # =========================================
 st.subheader("☁️ Eksport / Pobieranie")
 if st.session_state.get("plan_df") is None or st.session_state.get("plan_cols") is None:
@@ -1022,18 +883,25 @@ else:
     gs_title = st.text_input("Tytuł nowego arkusza (dla NOWEGO pliku)", value=gs_title_default, key="gs_title")
 
     export_df = st.session_state["plan_df"][st.session_state["plan_cols"]].copy()
+
+    # 1) Eksport pełnego planu
     csv_buffer2 = io.StringIO()
     export_df.to_csv(csv_buffer2, index=False, encoding='utf-8')
     csv_bytes2 = csv_buffer2.getvalue().encode('utf-8-sig')
-    st.download_button(
-        "📥 Pobierz aktualny plan (CSV)",
-        data=csv_bytes2,
-        file_name="plan_tresci_hdbscan_ultimate.csv",
-        mime="text/csv",
-        type="primary",
-        key="dl_csv_latest"
-    )
+    st.download_button("📥 Pobierz aktualny plan (CSV)", data=csv_bytes2, file_name="plan_tresci_hdbscan.csv", mime="text/csv", type="primary", key="dl_csv_latest")
 
+    # 2) Eksport backloga do kolejnych analiz
+    backlog_cols = ['Słowo kluczowe','Wyklucz_następnym_razem']
+    backlog_df = export_df[backlog_cols].copy()
+    if 'Wygenerowano_tytuł' in export_df.columns:
+        wmask = export_df['Wygenerowano_tytuł'] == True
+        backlog_df.loc[wmask, 'Wyklucz_następnym_razem'] = True
+    csv_buffer3 = io.StringIO()
+    backlog_df.to_csv(csv_buffer3, index=False, encoding='utf-8')
+    st.download_button("🗂️ Pobierz Backlog (CSV do następnej analizy)", data=csv_buffer3.getvalue().encode('utf-8-sig'),
+                       file_name="backlog_planer.csv", mime="text/csv")
+
+    # 3) Google Sheets
     if st.button("Wyślij do Google Sheets (z kolorami)", key="export_gs"):
         try:
             with st.spinner("Wysyłam dane do Google Sheets i ustawiam kolorowanie..."):
