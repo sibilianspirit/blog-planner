@@ -1,6 +1,3 @@
-# ==== Build marker (żeby upewnić się, że deploy zaciągnął nową wersję) ====
-BUILD_MARKER = "2025-10-11-#C"
-
 import streamlit as st
 import pandas as pd
 import openai
@@ -14,6 +11,7 @@ import hdbscan
 import numpy as np
 import gspread
 import warnings
+
 warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"hdbscan\.robust_single_linkage_")
 
 # -------------------------------------------------------------
@@ -208,6 +206,26 @@ def detect_search_intent(keyword):
     else:
         return 'Mieszana'
 
+def classify_article_type(keyword: str, cluster_size: int, intent: str) -> str:
+    """
+    Zwraca typ treści: 'Ranking/Lista', 'Porównanie', 'Poradnik/How-to',
+    'Definicja/Co to jest', 'Recenzja/Opinie', 'Temat ogólny'.
+    """
+    k = (keyword or "").lower()
+    if any(x in k for x in ["ranking", "najlepsze", "top ", "top-", "top_", "top10", "top 10", "polecane", "lista", "zestawienie"]):
+        return "Ranking/Lista"
+    if any(x in k for x in [" vs ", " porównanie", "alternatywy", "alternatywa", "zamiennik", "zamienniki", "konkurencja"]):
+        return "Porównanie"
+    if any(x in k for x in ["opinie", "recenzja", "recenzje"]):
+        return "Recenzja/Opinie"
+    if any(x in k for x in ["jak ", "jak zrobić", "jak działa"]):
+        return "Poradnik/How-to"
+    if any(x in k for x in ["co to", "co to jest", "czym jest", "definicja"]):
+        return "Definicja/Co to jest"
+    if cluster_size >= 5 and intent in ("Mieszana", "Transakcyjna"):
+        return "Ranking/Lista"
+    return "Temat ogólny"
+
 def calculate_priority_score(row):
     volume_score = min((row.get('Wolumen', 0) or 0) / 1000, 100)
     position = int(row.get('Aktualna_pozycja', 0) or 0)
@@ -226,6 +244,19 @@ def calculate_priority_score(row):
     priority = (volume_score * 0.4) + (position_score * 0.3) + (similarity_score * 0.2) + (cluster_quality_score * 0.1)
     return round(priority, 2)
 
+def compute_priority_bucket(series: pd.Series) -> pd.Series:
+    """
+    Na bazie Priorytet_Score tworzy priorytet 1..10 (1 = najwyższy).
+    Używa decyli; remisy trzyma spójnie.
+    """
+    if series.empty:
+        return series
+    # zbuduj rangi malejąco po score (większy score = wyższy priorytet)
+    ranks = series.rank(method="min", ascending=False)
+    deciles = pd.qcut(ranks, 10, labels=False, duplicates='drop')  # 0..9
+    # zamiana 0..9 -> 1..10 (1 najwyższy)
+    return (deciles + 1)
+
 def find_first_competitor_url(row):
     for col in row.index:
         if isinstance(col, str) and col.endswith(': URL') and pd.notna(row[col]):
@@ -236,20 +267,18 @@ def generate_titles(api_key, keyword, volume, competitor_url, related_keywords="
     client = openai.OpenAI(api_key=api_key)
     related_info = f"\n- Powiązane frazy do uwzględnienia: {related_keywords}" if related_keywords else ""
     prompt = f"""
-Jesteś ekspertem SEO i copywriterem specjalizującym się w tworzeniu angażujących tytułów na polskojęzyczne blogi.
-Przeanalizuj poniższe dane:
-- Główne słowo kluczowe: "{keyword}"
+Jesteś ekspertem SEO i copywriterem tworzącym tytuły na polskojęzyczne blogi.
+Dane wejściowe:
+- Główne słowo kluczowe: "{keyword}"  ← UŻYJ DOKŁADNIE TEJ FRAZY (bez zmian).
 - Miesięczny wolumen wyszukiwania: {volume}{related_info}
-- Artykuł konkurencji: {competitor_url}
+- Artykuł konkurencji (tylko inspiracja kontekstu): {competitor_url}
 
-Twoje zadanie: Zaproponuj 3 unikalne tytuły artykułów blogowych.
 Zasady:
-1. Główny tytuł musi zawierać dokładną frazę kluczową: "{keyword}".
-2. Jeśli są powiązane frazy, włącz je naturalnie w treść tytułów (nie wszystkie na raz, różnicuj).
-3. Tytuły muszą mieć charakter informacyjny lub poradnikowy (np. "jak...", "co to jest...").
-4. Stosuj polskie zasady pisowni – tylko pierwsza litera w tytule wielka.
-5. Zamiast dwukropka używaj myślnika.
-6. Zwróć odpowiedź wyłącznie w formie listy numerowanej.
+1) Każdy tytuł MUSI zawierać dokładnie frazę: "{keyword}" (bez modyfikacji i literówek).
+2) Styl informacyjny/poradnikowy: „co to jest…”, „jak…”, „poradnik…”, „ranking…”, „porównanie…” — dobierz naturalnie do intencji.
+3) Pisownia zgodna z PL. Unikaj dwukropków; używaj myślnika.
+4) Nie wprowadzaj nowych wariantów nazwy własnej/branda; nie poprawiaj frazy wejściowej.
+5) Zwróć WYŁĄCZNIE listę numerowaną 1..3 z 3 różnymi propozycjami.
 """
     for attempt in range(max_retries):
         try:
@@ -264,10 +293,23 @@ Zasady:
             )
             content = response.choices[0].message.content
             titles = re.findall(r'\d+\.\s*(.*)', content)
-            while len(titles) < 3:
-                titles.append("---")
-            time.sleep(0.4)
-            return titles[:3]
+
+            # Wymuś obecność dokładnej frazy w każdym tytule
+            _kw = str(keyword).strip()
+            _kw_low = _kw.lower()
+            _clean = []
+            for t in (titles[:3] if titles else []):
+                t = (t or "").strip()
+                if _kw_low not in t.lower():
+                    if t:
+                        t = f"{t} — {_kw}"
+                    else:
+                        t = f"{_kw} — co to jest i jak działa?"
+                _clean.append(t)
+            while len(_clean) < 3:
+                _clean.append(f"{_kw} — poradnik dla początkujących")
+            return _clean[:3]
+
         except Exception as e:
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
@@ -308,10 +350,8 @@ def export_df_to_google_sheets_with_colors(
 
     try:
         if ss_id:
-            # zapis do istniejącego pliku (omija limit tworzenia nowych plików i błędy quota)
             sh = gc.open_by_key(ss_id)
         else:
-            # tworzenie nowego pliku; jeśli folder_id podane -> w tym folderze
             if folder_id.strip():
                 sh = gc.create(title, folder_id=folder_id.strip())
             else:
@@ -364,7 +404,6 @@ def export_df_to_google_sheets_with_colors(
         col_red = {"red": 1.00, "green": 0.92, "blue": 0.93}
 
         status_col_letter = colnum_to_letter(status_col_idx_1)
-        # Startujemy od 2. wiersza (pierwszy to nagłówek)
         base_cell = f"${status_col_letter}2"
 
         requests = [
@@ -437,7 +476,6 @@ def export_df_to_google_sheets_with_colors(
 
         sh.batch_update({"requests": requests})
     except Exception as e:
-        # Sam eksport zadziałał; tylko kolorowanie się wywaliło – nie blokuj zwrotu URL
         st.warning(f"Nie udało się ustawić formatowania warunkowego: {e}")
 
     return sh.url
@@ -446,7 +484,7 @@ def export_df_to_google_sheets_with_colors(
 # UI
 # -------------------------------------------------------------
 st.title("🚀 Planer Treści SEO [Wersja HDBSCAN v9 - ULTIMATE]")
-st.markdown("✨ Zaawansowana klasteryzacja z HDBSCAN, analiza intencji, scoring priorytetów i rozszerzony status rankingu.")
+st.markdown("✨ Zaawansowana klasteryzacja z HDBSCAN, analiza intencji, agenda priorytetów 1–10 oraz propozycje formatów treści.")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -634,6 +672,7 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                     status = 'Nowy temat'
                     url = 'Stwórz nowy artykuł'
                 intent = detect_search_intent(keyword)
+
                 result = {
                     'Słowo kluczowe': keyword,
                     'Wolumen': volume,
@@ -645,6 +684,7 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                     'Intencja': intent,
                     'Aktualna_pozycja': 0
                 }
+
                 if enable_clustering:
                     result['Klaster_ID'] = row_dict.get('Klaster_ID', 0)
                     result['HEAD_Keyword'] = row_dict.get('HEAD_Keyword', keyword)
@@ -653,12 +693,51 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                     result['Jest_Outlier'] = bool(row_dict.get('Jest_Outlier', False))
                     result['Cluster_Probability'] = round(float(row_dict.get('Cluster_Probability', 1.0)), 3)
                     result['Cluster_Quality'] = round(float(row_dict.get('Cluster_Quality', 1.0)), 3)
+
+                # typ artykułu
+                _cluster_size_for_type = int(result.get('Liczba_fraz_w_klastrze', 1) or 1)
+                result['Typ_artykułu'] = classify_article_type(keyword, _cluster_size_for_type, intent)
+
                 results.append(result)
 
         df_results = pd.DataFrame(results)
 
+        # Agenda: score → bucket 1..10
         df_results['Priorytet_Score'] = df_results.apply(calculate_priority_score, axis=1)
+        df_results['Priorytet'] = compute_priority_bucket(df_results['Priorytet_Score']).astype('Int64')
 
+        # HEAD jako nazwa grupy tematycznej
+        if 'HEAD_Keyword' in df_results.columns:
+            df_results['Grupa_tematyczna'] = df_results['HEAD_Keyword']
+        else:
+            df_results['Grupa_tematyczna'] = df_results['Słowo kluczowe']
+
+        # Rekomendacja grupowania (prosta, zrozumiała)
+        def _reco(row):
+            size_ = int(row.get('Liczba_fraz_w_klastrze', 1) or 1)
+            qual_ = float(row.get('Cluster_Quality', 1.0) or 1.0)
+            if size_ >= 4 and qual_ >= 0.6:
+                return "Jeden artykuł"
+            if size_ <= 2 or qual_ < 0.45:
+                return "Osobne wpisy"
+            return "Do decyzji"
+        df_results['Rekomendacja_grupowania'] = df_results.apply(_reco, axis=1)
+
+        # Frazy_w_klastrze_TOP5 (podgląd)
+        if enable_clustering and 'Klaster_ID' in df_results.columns:
+            top5_map = {}
+            # zbuduj mapę: klaster -> top 5 fraz po wolumenie (lub po prostu pierwsze 5)
+            for cid, g in df_results.groupby('Klaster_ID'):
+                try:
+                    gg = g.sort_values('Wolumen', ascending=False)
+                except Exception:
+                    gg = g
+                top5_map[cid] = ", ".join(gg['Słowo kluczowe'].tolist()[:5])
+            df_results['Frazy_w_klastrze_TOP5'] = df_results['Klaster_ID'].map(top5_map).fillna('-')
+        else:
+            df_results['Frazy_w_klastrze_TOP5'] = '-'
+
+        # Tytuły dla HEAD-ów „Nowy temat”
         if enable_clustering:
             df_new_topics = df_results[
                 (df_results['Status'] == 'Nowy temat') &
@@ -703,7 +782,7 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 df_results = pd.merge(df_results, df_titles, on='Słowo kluczowe', how='left')
 
         # --- Ujednolicenie typów i uzupełnienie braków (zawsze) ---
-        force_int_cols = ['Wolumen', 'Aktualna_pozycja', 'Liczba_fraz_w_klastrze', 'Klaster_ID']
+        force_int_cols = ['Wolumen', 'Aktualna_pozycja', 'Liczba_fraz_w_klastrze', 'Klaster_ID', 'Priorytet']
         for c in force_int_cols:
             if c in df_results.columns:
                 df_results[c] = pd.to_numeric(df_results[c], errors='coerce').fillna(0).astype(int)
@@ -725,15 +804,6 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
 
         st.success("✅ Analiza zakończona!")
 
-        # Statystyki (HDBSCAN)
-        if enable_clustering and 'Klaster_ID' in df_results.columns:
-            if 'Cluster_Quality' in df_results.columns:
-                st.subheader("📈 Statystyki Klasteryzacji HDBSCAN")
-        if enable_clustering and 'Klaster_ID' in df_results.columns:
-            if 'Cluster_Quality' in df_results.columns:
-                # jeśli wcześniej policzono cluster_stats
-                pass
-
         # Szybkie metryki
         colm1, colm2, colm3, colm4 = st.columns(4)
         with colm1:
@@ -744,22 +814,41 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
             if enable_clustering and 'Klaster_ID' in df_results.columns:
                 st.metric("Liczba klastrów", df_results['Klaster_ID'].nunique())
         with colm4:
-            st.metric("Średni priorytet", f"{df_results['Priorytet_Score'].mean():.1f}")
+            st.metric("Średni Priorytet (1=best)", f"{df_results['Priorytet'].mean():.1f}")
 
         st.header("📊 Wyniki Analizy i Plan Treści")
 
-        df_results_sorted = df_results.sort_values(by=['Priorytet_Score', 'Wolumen'], ascending=[False, False])
+        # Sort: najpierw agenda (1..10), potem score i wolumen
+        df_results_sorted = df_results.sort_values(
+            by=['Priorytet', 'Priorytet_Score', 'Wolumen'],
+            ascending=[True, False, False]
+        )
+
+        # Widok domyślny – biznesowy
+        show_advanced = st.checkbox("Pokaż metryki techniczne (HDBSCAN, outliery, prawdopodobieństwo)", value=False, key="show_adv")
+
         cols_order = [
-            'Słowo kluczowe', 'Wolumen', 'Priorytet_Score', 'Status',
-            'Akcja / Dopasowany URL', 'Najbliższy_artykuł', 'Podobieństwo',
-            'Intencja', 'Aktualna_pozycja'
+            'Priorytet',
+            'Grupa_tematyczna',
+            'Słowo kluczowe',
+            'Wolumen',
+            'Status',
+            'Rekomendacja_grupowania',
+            'Typ_artykułu',
+            'Frazy_w_klastrze_TOP5',
+            'Akcja / Dopasowany URL',
+            'Najbliższy_artykuł',
+            'Najbliższy_tytuł',
+            'Intencja',
+            'Aktualna_pozycja'
         ]
-        if enable_clustering:
+        if show_advanced:
             cols_order.extend([
                 'Klaster_ID', 'HEAD_Keyword', 'Typ_w_klastrze', 'Liczba_fraz_w_klastrze',
-                'Jest_Outlier', 'Cluster_Probability', 'Cluster_Quality'
+                'Jest_Outlier', 'Cluster_Probability', 'Cluster_Quality', 'Podobieństwo', 'Priorytet_Score'
             ])
         cols_order.extend(['Propozycja_tematu_1', 'Propozycja_tematu_2', 'Propozycja_tematu_3'])
+
         existing_cols = [c for c in cols_order if c in df_results_sorted.columns]
 
         def highlight_rows(row):
@@ -780,8 +869,8 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
             display_df['Jest_Outlier'] = display_df['Jest_Outlier'].map({True: 'TAK', False: ''})
 
         # Uzupełnij tekstowe kolumny '-'
-        obj_cols = display_df.select_dtypes(include=['object']).columns
-        display_df[obj_cols] = display_df[obj_cols].fillna('-')
+        _obj_cols = display_df.select_dtypes(include=['object']).columns
+        display_df[_obj_cols] = display_df[_obj_cols].fillna('-')
 
         # Zapisz do session_state, żeby nie znikło po kliknięciu innych przycisków
         st.session_state["plan_df"] = display_df.copy()
@@ -794,15 +883,21 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         )
 
         st.markdown("""
-        **Legenda kolorów:**
-        - 🟢 Zielony: Nowy temat
-        - 🟠 Pomarańczowy: Blisko TOP1 (optymalizacja)
-        - 🔴 Czerwony: Nie rankuje
-        """)
+**Legenda i wskazówki:**
+- **Priorytet**: 1 = najwyższy, 10 = najniższy (agenda działań).
+- **Grupa tematyczna**: nazwa przewodnia (HEAD) dla całego klastra.
+- **Rekomendacja grupowania**:
+  - *Jeden artykuł* – frazy są spójne; zaplanuj jeden, mocny materiał.
+  - *Osobne wpisy* – frazy się rozchodzą; rozbij na kilka treści.
+  - *Do decyzji* – spójność umiarkowana; zależy od strategii i zasobów.
+- 🟢 Zielony wiersz: Nowy temat
+- 🟠 Pomarańczowy: Blisko TOP1 (optymalizacja)
+- 🔴 Czerwony: Nie rankuje
+""")
 
         # Eksport CSV (natychmiast)
         csv_buffer = io.StringIO()
-        df_results_sorted[existing_cols].to_csv(csv_buffer, index=False, encoding='utf-8')
+        display_df[existing_cols].to_csv(csv_buffer, index=False, encoding='utf-8')
         csv_bytes = csv_buffer.getvalue().encode('utf-8-sig')
         st.download_button(
             "📥 Pobierz gotowy plan treści jako CSV",
@@ -815,7 +910,7 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         # Dodatkowe eksporty
         colx1, colx2 = st.columns(2)
         with colx1:
-            if enable_clustering and 'Typ_w_klastrze' in df_results_sorted.columns:
+            if 'Typ_w_klastrze' in df_results_sorted.columns:
                 df_head_only = df_results_sorted[df_results_sorted['Typ_w_klastrze'] == 'HEAD']
                 csv_head_buffer = io.StringIO()
                 df_head_only[existing_cols].to_csv(csv_head_buffer, index=False, encoding='utf-8')
@@ -899,8 +994,8 @@ else:
                     st.session_state["plan_df"],
                     st.session_state["plan_cols"],
                     title=gs_title,
-                    existing_spreadsheet_id_or_url=existing_sheet_input,  # <- zapis do istniejącego, jeśli podano
-                    folder_id=target_folder_id  # <- tworzenie nowego w folderze (jeśli nie podano powyżej)
+                    existing_spreadsheet_id_or_url=existing_sheet_input,
+                    folder_id=target_folder_id
                 )
             if url:
                 st.success(f"Gotowe! Otwórz arkusz: {url}")
