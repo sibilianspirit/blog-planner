@@ -11,6 +11,7 @@ import hdbscan
 import numpy as np
 import gspread
 import warnings
+import difflib  # <= NOWE
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"hdbscan\.robust_single_linkage_")
 
@@ -223,9 +224,42 @@ def _safe_float(x, default=1.0):
     except Exception:
         return default
 
+# Normalizacja + podobieństwa leksykalne (precyzja dla wariantów)
+_PL_MAP = str.maketrans({
+    "ą":"a","ć":"c","ę":"e","ł":"l","ń":"n","ó":"o","ś":"s","ż":"z","ź":"z",
+    "Ą":"a","Ć":"c","Ę":"e","Ł":"l","Ń":"n","Ó":"o","Ś":"s","Ż":"z","Ź":"z"
+})
+_STOPWORDS = set("""
+do dla w na z za o od u po przy pod nad bez jak co to jest czym 
+dla dzieci dziecko dzieciaki dzieciecy dziecieca dziecie
+""".split())
+
+def _normalize_kw(s: str) -> list[str]:
+    s = (s or "").lower().translate(_PL_MAP)
+    tokens = re.split(r"[^a-z0-9]+", s)
+    tokens = [t for t in tokens if t and t not in _STOPWORDS and len(t) > 1]
+    return tokens
+
+def _lexical_sim(a: str, b: str) -> float:
+    return difflib.SequenceMatcher(a=(a or "").lower(), b=(b or "").lower()).ratio()
+
+def _jaccard_tokens(a: str, b: str) -> float:
+    A, B = set(_normalize_kw(a)), set(_normalize_kw(b))
+    if not A or not B:
+        return 0.0
+    return len(A & B) / len(A | B)
+
 def _reco(row: pd.Series) -> str:
     size_ = _safe_int(row.get('Liczba_fraz_w_klastrze', np.nan), default=1)
     qual_ = _safe_float(row.get('Cluster_Quality', np.nan), default=1.0)
+    kw = str(row.get('Słowo kluczowe', '') or '')
+    head = str(row.get('HEAD_Keyword', kw) or '')
+
+    s_lex = _lexical_sim(kw, head)
+    s_jac = _jaccard_tokens(kw, head)
+
+    if max(s_lex, s_jac) >= 0.88:
+        return "Jeden artykuł"
     if size_ >= 4 and qual_ >= 0.60:
         return "Jeden artykuł"
     if size_ <= 2 or qual_ < 0.45:
@@ -272,14 +306,15 @@ def calculate_priority_score(row):
 
 def compute_priority_bucket(series: pd.Series) -> pd.Series:
     """
-    Na bazie Priorytet_Score tworzy priorytet 1..10 (1 = najwyższy).
-    Używa decyli; remisy trzyma spójnie.
+    Zamienia Priorytet_Score na 1..10 (1 = najwyższy), stabilnie nawet przy duplikatach/małych próbach.
     """
-    if series.empty:
+    n = int(series.shape[0])
+    if n == 0:
         return series
-    ranks = series.rank(method="min", ascending=False)
-    deciles = pd.qcut(ranks, 10, labels=False, duplicates='drop')  # 0..9 (lub mniej przy małych próbach)
-    return (deciles + 1)
+    ranks = series.rank(method="first", ascending=False)  # 1..n (1 = najwyższy score)
+    step = max(n / 10.0, 1.0)
+    buckets = np.ceil(ranks / step).astype(int)          # 1..10
+    return buckets.clip(1, 10)
 
 def find_first_competitor_url(row):
     for col in row.index:
@@ -318,7 +353,6 @@ Zasady:
             content = response.choices[0].message.content
             titles = re.findall(r'\d+\.\s*(.*)', content)
 
-            # Wymuś obecność dokładnej frazy w każdym tytule
             _kw = str(keyword).strip()
             _kw_low = _kw.lower()
             _clean = []
@@ -398,7 +432,6 @@ def export_df_to_google_sheets_with_colors(
     # Dane
     try:
         data = df[columns_in_order].copy()
-        # Zamień Inf/NaN na puste stringi - Google Sheets/JSON nie akceptuje NaN/Inf
         data = data.replace([np.inf, -np.inf], np.nan)
         data = data.where(pd.notna(data), "")
         ws.update([data.columns.tolist()] + data.astype(object).values.tolist())
@@ -431,7 +464,6 @@ def export_df_to_google_sheets_with_colors(
         base_cell = f"${status_col_letter}2"
 
         requests = [
-            # Auto-resize kolumn
             {
                 "autoResizeDimensions": {
                     "dimensions": {
@@ -442,7 +474,6 @@ def export_df_to_google_sheets_with_colors(
                     }
                 }
             },
-            # Zielone tło dla dokładnie "Nowy temat"
             {
                 "addConditionalFormatRule": {
                     "rule": {
@@ -460,7 +491,6 @@ def export_df_to_google_sheets_with_colors(
                     "index": 0
                 }
             },
-            # Pomarańczowe tło gdy Status zawiera "TOP1"
             {
                 "addConditionalFormatRule": {
                     "rule": {
@@ -478,7 +508,6 @@ def export_df_to_google_sheets_with_colors(
                     "index": 0
                 }
             },
-            # Czerwone tło gdy Status zawiera "Nie rankuje"
             {
                 "addConditionalFormatRule": {
                     "rule": {
@@ -756,6 +785,60 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         # Rekomendacja grupowania (po czyszczeniu typów)
         df_results['Rekomendacja_grupowania'] = df_results.apply(_reco, axis=1)
 
+        # ===== Generowanie tytułów dla TOP N nowych tematów (HEAD) =====
+        if enable_clustering:
+            df_new_topics = df_results[
+                (df_results['Status'] == 'Nowy temat') &
+                (df_results['Typ_w_klastrze'] == 'HEAD')
+            ].copy()
+        else:
+            df_new_topics = df_results[df_results['Status'] == 'Nowy temat'].copy()
+
+        if not df_new_topics.empty:
+            df_to_process = df_new_topics.sort_values(by='Priorytet_Score', ascending=False).head(num_to_generate)
+            st.info(f"Generuję propozycje tytułów dla {len(df_to_process)} najważniejszych nowych tematów...")
+            df_gap_indexed = df_gap.set_index('Keyword')
+            df_to_process['Competitor URL'] = df_to_process['Słowo kluczowe'].map(
+                df_gap_indexed.apply(find_first_competitor_url, axis=1)
+            )
+            progress_bar = st.progress(0, text="Generowanie tytułów (GPT-4o)...")
+            generated_titles_data = []
+            for i, (idx, row) in enumerate(df_to_process.iterrows()):
+                related_keywords = ""
+                if enable_clustering and row.get('Liczba_fraz_w_klastrze', 1) > 1:
+                    related = df_results[
+                        (df_results['Klaster_ID'] == row['Klaster_ID']) &
+                        (df_results['Typ_w_klastrze'] == 'RELATED')
+                    ]['Słowo kluczowe'].tolist()
+                    related_keywords = ", ".join(related[:5])
+                titles = generate_titles(
+                    openai_api_key,
+                    row['Słowo kluczowe'],
+                    row['Wolumen'],
+                    row.get('Competitor URL', 'Brak'),
+                    related_keywords
+                )
+                generated_titles_data.append({
+                    'Słowo kluczowe': row['Słowo kluczowe'],
+                    'Propozycja_tematu_1': titles[0],
+                    'Propozycja_tematu_2': titles[1],
+                    'Propozycja_tematu_3': titles[2]
+                })
+                progress_bar.progress((i + 1) / len(df_to_process), text=f"Generowanie tytułów ({i+1}/{len(df_to_process)})")
+            if generated_titles_data:
+                df_titles = pd.DataFrame(generated_titles_data)
+                df_results = pd.merge(df_results, df_titles, on='Słowo kluczowe', how='left')
+
+                # PODGLĄD „TOP N – propozycje tytułów”
+                with st.expander(f"📝 Propozycje tytułów (TOP {len(df_to_process)})", expanded=True):
+                    preview_cols = ['Słowo kluczowe', 'Wolumen',
+                                    'Propozycja_tematu_1', 'Propozycja_tematu_2', 'Propozycja_tematu_3']
+                    _titles_preview = df_results.loc[
+                        df_results['Słowo kluczowe'].isin(df_to_process['Słowo kluczowe'])
+                    ][preview_cols].sort_values('Wolumen', ascending=False)
+                    st.dataframe(_titles_preview, use_container_width=True)
+        # ================================================================
+
         st.success("✅ Analiza zakończona!")
 
         # Szybkie metryki
@@ -785,7 +868,7 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
             key="show_adv"
         )
 
-        # =================== (UWAGA: ten blok musi być wewnątrz if-button) ===================
+        # =================== (wewnątrz if-button) ===================
         cols_order = [
             'Priorytet',
             'Słowo kluczowe', 'Wolumen', 'Status',
@@ -800,7 +883,7 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 'Jest_Outlier', 'Cluster_Probability', 'Cluster_Quality', 'Priorytet_Score'
             ])
         cols_order.extend(['Propozycja_tematu_1', 'Propozycja_tematu_2', 'Propozycja_tematu_3'])
-        # =====================================================================================
+        # ============================================================
 
         existing_cols = [c for c in cols_order if c in df_results_sorted.columns]
 
@@ -817,7 +900,7 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         # Przygotuj wersję do WYŚWIETLENIA
         display_df = df_results_sorted.copy()
 
-        # Frazy_w_klastrze_TOP5 (podgląd — zbuduj dopiero tutaj, aby mieć pełny set)
+        # Frazy_w_klastrze_TOP5 (podgląd – budujemy tu, by mieć pełny set)
         if enable_clustering and 'Klaster_ID' in display_df.columns and 'Frazy_w_klastrze_TOP5' not in display_df.columns:
             top5_map = {}
             for cid, g in display_df.groupby('Klaster_ID'):
