@@ -158,7 +158,6 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
         group['Liczba_fraz_w_klastrze'] = len(group)
         return group
 
-    # Uwaga: bez include_groups (żeby nie zgubić kolumny Klaster_ID)
     tmp = keywords_df.groupby('Klaster_ID', group_keys=False).apply(get_head_keyword)
 
     # Jeżeli Klaster_ID trafił do indeksu — przywróć go jako kolumnę
@@ -206,7 +205,7 @@ def detect_search_intent(keyword):
     else:
         return 'Mieszana'
 
-# --- Rekomedacja grupowania + precyzja wariantów
+# --- Rekomendacja grupowania + precyzja wariantów
 def _safe_int(x, default=1):
     try:
         if pd.isna(x):
@@ -747,7 +746,10 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         df_results['Priorytet'] = compute_priority_bucket(df_results['Priorytet_Score'])
 
         # Grupa tematyczna
-        df_results['Grupa_tematyczna'] = df_results['HEAD_Keyword'] if 'HEAD_Keyword' in df_results.columns else df_results['Słowo kluczowe']
+        if 'HEAD_Keyword' in df_results.columns:
+            df_results['Grupa_tematyczna'] = df_results['HEAD_Keyword']
+        else:
+            df_results['Grupa_tematyczna'] = df_results['Słowo kluczowe']
 
         # Typy i brakujące wartości
         force_int_cols = ['Wolumen', 'Aktualna_pozycja', 'Liczba_fraz_w_klastrze', 'Klaster_ID', 'Priorytet']
@@ -774,72 +776,120 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
 
         st.success("✅ Analiza zakończona!")
 
-        # Widok i sortowanie
+        # Sort domyślny
         df_results_sorted = df_results.sort_values(by=['Priorytet', 'Priorytet_Score', 'Wolumen'], ascending=[True, False, False])
+
+        # === INICJUJ kolumny z propozycjami *przed* edytorem ===
+        for col in ['Propozycja_tematu_1','Propozycja_tematu_2','Propozycja_tematu_3']:
+            if col not in df_results_sorted.columns:
+                df_results_sorted[col] = '-'
 
         show_advanced = st.checkbox("Pokaż metryki techniczne (HDBSCAN, outliery, prawdopodobieństwo)", value=False, key="show_adv")
 
+        # Kolumny pokazywane w edytorze (ale do edytora przekażemy pełny DF; ukryte kolumny dalej istnieją)
         cols_order = [
             'Priorytet', 'Słowo kluczowe', 'Wolumen', 'Status',
             'Grupa_tematyczna', 'Typ_artykułu', 'Rekomendacja_grupowania',
             'Akcja / Dopasowany URL', 'Najbliższy_artykuł', 'Podobieństwo',
             'Intencja', 'Aktualna_pozycja',
-            'Wybrane_do_tytułów', 'Wygenerowano_tytuł', 'Wyklucz_następnym_razem'
+            'Wybrane_do_tytułów', 'Wygenerowano_tytuł', 'Wyklucz_następnym_razem',
+            'Propozycja_tematu_1','Propozycja_tematu_2','Propozycja_tematu_3'
         ]
         if show_advanced:
             cols_order.extend([
                 'Klaster_ID', 'HEAD_Keyword', 'Typ_w_klastrze', 'Liczba_fraz_w_klastrze',
                 'Jest_Outlier', 'Cluster_Probability', 'Cluster_Quality', 'Priorytet_Score'
             ])
+        # zapewnij, że Priorytet_Score pozostaje dostępny (do sortowania), nawet jeśli widok tech = OFF
+        if 'Priorytet_Score' not in cols_order and 'Priorytet_Score' in df_results_sorted.columns:
+            cols_order.append('Priorytet_Score')
 
         # === Edytowalna tabela z checkboxami ===
         st.subheader("📋 Plan – wybierz frazy checkboxem lub użyj trybu automatycznego")
         edit_cols = [c for c in cols_order if c in df_results_sorted.columns]
+
         column_config = {
             "Wybrane_do_tytułów": st.column_config.CheckboxColumn("Wybrane_do_tytułów", help="Zaznacz frazy do wygenerowania tytułów"),
             "Wyklucz_następnym_razem": st.column_config.CheckboxColumn("Wyklucz_następnym_razem", help="Omiń przy kolejnej analizie"),
             "Wygenerowano_tytuł": st.column_config.CheckboxColumn("Wygenerowano_tytuł", disabled=True, help="Ustawiane automatycznie po generacji")
         }
+
+        # Przekazujemy pełny DF, a UI kontrolujemy column_order -> ukryte kolumny nadal istnieją (np. Priorytet_Score)
         edited_df = st.data_editor(
-            df_results_sorted[edit_cols],
+            df_results_sorted,
+            column_order=edit_cols,
             use_container_width=True,
             num_rows="dynamic",
             column_config=column_config,
             hide_index=True
         )
 
+        st.caption(f"Nowych tematów w widoku: {(edited_df['Status'] == 'Nowy temat').sum()}")
+
         # ======= GENEROWANIE TYTUŁÓW =======
         st.subheader("📝 Generowanie tytułów")
+
         if gen_mode == "Automatycznie (TOP N)":
             if st.button("Generuj tytuły – tryb automatyczny (TOP N)"):
                 if enable_clustering and 'Typ_w_klastrze' in edited_df.columns:
                     candidates = edited_df[(edited_df['Status'] == 'Nowy temat') & (edited_df['Typ_w_klastrze'] == 'HEAD')].copy()
                 else:
                     candidates = edited_df[edited_df['Status'] == 'Nowy temat'].copy()
-                to_process = candidates.sort_values('Priorytet_Score', ascending=False).head(int(num_to_generate))
 
-                df_gap_indexed = df_gap_raw.set_index('Keyword')
-                gen_rows = []
-                progress = st.progress(0.0, text="Generowanie…")
-                for i, (_, r) in enumerate(to_process.iterrows()):
-                    related_keywords = ""
-                    if enable_clustering and 'Klaster_ID' in edited_df.columns and 'Typ_w_klastrze' in edited_df.columns:
-                        related = edited_df[(edited_df['Klaster_ID'] == r.get('Klaster_ID')) & (edited_df['Typ_w_klastrze'] == 'RELATED')]['Słowo kluczowe'].tolist() if 'Typ_w_klastrze' in edited_df.columns else []
-                        related_keywords = ", ".join(related[:5])
-                    comp_url = find_first_competitor_url(df_gap_indexed.loc[r['Słowo kluczowe']]) if r['Słowo kluczowe'] in df_gap_indexed.index else "Brak"
-                    titles = generate_titles(openai_api_key, r['Słowo kluczowe'], r['Wolumen'], comp_url, related_keywords)
-                    gen_rows.append((r['Słowo kluczowe'], titles))
-                    progress.progress((i+1)/max(len(to_process),1), text=f"Generowanie ({i+1}/{len(to_process)})")
+                # --- solidne sortowanie z fallbackiem ---
+                sort_cols, sort_asc = [], []
+                if 'Priorytet_Score' in candidates.columns:
+                    sort_cols.append('Priorytet_Score'); sort_asc.append(False)  # większy score → wyżej
+                if 'Priorytet' in candidates.columns:
+                    sort_cols.append('Priorytet');       sort_asc.append(True)   # 1 → wyżej
+                if 'Wolumen' in candidates.columns:
+                    sort_cols.append('Wolumen');         sort_asc.append(False)  # większy → wyżej
+                if sort_cols:
+                    candidates = candidates.sort_values(by=sort_cols, ascending=sort_asc)
 
-                ed = edited_df.set_index('Słowo kluczowe').copy()
-                for kw, titles in gen_rows:
-                    for j, col in enumerate(['Propozycja_tematu_1','Propozycja_tematu_2','Propozycja_tematu_3']):
-                        ed.loc[kw, col] = titles[j]
-                    ed.loc[kw, 'Wygenerowano_tytuł'] = True
-                    ed.loc[kw, 'Wyklucz_następnym_razem'] = True
+                to_process = candidates.head(int(num_to_generate))
+                if to_process.empty:
+                    st.warning("Brak kandydatów z 'Nowy temat'. Zmniejsz próg podobieństwa lub sprawdź wejściowe CSV.")
+                else:
+                    df_gap_indexed = df_gap_raw.set_index('Keyword')
+                    gen_rows = []
+                    progress = st.progress(0.0, text="Generowanie…")
+                    for i, (_, r) in enumerate(to_process.iterrows()):
+                        related_keywords = ""
+                        if enable_clustering and 'Klaster_ID' in edited_df.columns and 'Typ_w_klastrze' in edited_df.columns:
+                            related = edited_df[
+                                (edited_df['Klaster_ID'] == r.get('Klaster_ID')) &
+                                (edited_df['Typ_w_klastrze'] == 'RELATED')
+                            ]['Słowo kluczowe'].tolist() if 'Typ_w_klastrze' in edited_df.columns else []
+                            related_keywords = ", ".join(related[:5])
 
-                edited_df = ed.reset_index()
-                st.success("Tytuły wygenerowane (tryb automatyczny). Przewiń tabelę by zobaczyć kolumny z propozycjami.")
+                        comp_url = "Brak"
+                        if r['Słowo kluczowe'] in df_gap_indexed.index:
+                            try:
+                                comp_url = find_first_competitor_url(df_gap_indexed.loc[r['Słowo kluczowe']])
+                            except Exception:
+                                comp_url = "Brak"
+
+                        titles = generate_titles(
+                            openai_api_key,
+                            r['Słowo kluczowe'],
+                            r.get('Wolumen', 0),
+                            comp_url,
+                            related_keywords
+                        )
+                        gen_rows.append((r['Słowo kluczowe'], titles))
+                        progress.progress((i+1)/max(len(to_process),1), text=f"Generowanie ({i+1}/{len(to_process)})")
+
+                    ed = edited_df.set_index('Słowo kluczowe').copy()
+                    for kw, titles in gen_rows:
+                        for j, col in enumerate(['Propozycja_tematu_1','Propozycja_tematu_2','Propozycja_tematu_3']):
+                            ed.loc[kw, col] = titles[j]
+                        ed.loc[kw, 'Wygenerowano_tytuł'] = True
+                        ed.loc[kw, 'Wyklucz_następnym_razem'] = True
+
+                    edited_df = ed.reset_index()
+                    st.success("Tytuły wygenerowane (tryb automatyczny). Przewiń tabelę, by zobaczyć kolumny z propozycjami.")
+
         else:
             if st.button("Generuj tytuły – dla zaznaczonych checkboxem"):
                 selected = edited_df[(edited_df['Wybrane_do_tytułów'] == True) & (edited_df['Status'] == 'Nowy temat')].copy()
@@ -852,10 +902,18 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                     for i, (_, r) in enumerate(selected.iterrows()):
                         related_keywords = ""
                         if enable_clustering and 'Klaster_ID' in edited_df.columns and 'Typ_w_klastrze' in edited_df.columns:
-                            related = edited_df[(edited_df['Klaster_ID'] == r.get('Klaster_ID')) & (edited_df['Typ_w_klastrze'] == 'RELATED')]['Słowo kluczowe'].tolist() if 'Typ_w_klastrze' in edited_df.columns else []
+                            related = edited_df[
+                                (edited_df['Klaster_ID'] == r.get('Klaster_ID')) &
+                                (edited_df['Typ_w_klastrze'] == 'RELATED')
+                            ]['Słowo kluczowe'].tolist() if 'Typ_w_klastrze' in edited_df.columns else []
                             related_keywords = ", ".join(related[:5])
-                        comp_url = find_first_competitor_url(df_gap_indexed.loc[r['Słowo kluczowe']]) if r['Słowo kluczowe'] in df_gap_indexed.index else "Brak"
-                        titles = generate_titles(openai_api_key, r['Słowo kluczowe'], r['Wolumen'], comp_url, related_keywords)
+                        comp_url = "Brak"
+                        if r['Słowo kluczowe'] in df_gap_indexed.index:
+                            try:
+                                comp_url = find_first_competitor_url(df_gap_indexed.loc[r['Słowo kluczowe']])
+                            except Exception:
+                                comp_url = "Brak"
+                        titles = generate_titles(openai_api_key, r['Słowo kluczowe'], r.get('Wolumen', 0), comp_url, related_keywords)
                         gen_rows.append((r['Słowo kluczowe'], titles))
                         progress.progress((i+1)/max(len(selected),1), text=f"Generowanie ({i+1}/{len(selected)})")
 
@@ -880,8 +938,9 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
             'Propozycja_tematu_1','Propozycja_tematu_2','Propozycja_tematu_3',
             'Wyklucz_następnym_razem','Wygenerowano_tytuł'
         ]
+        extra_cols = [c for c in ['Grupa_tematyczna','Akcja / Dopasowany URL','Podobieństwo','Intencja','Aktualna_pozycja'] if c in edited_df.columns]
         final_df = edited_df.copy()
-        st.dataframe(final_df[summary_cols + [c for c in ['Grupa_tematyczna','Akcja / Dopasowany URL','Podobieństwo','Intencja','Aktualna_pozycja'] if c in final_df.columns]], use_container_width=True)
+        st.dataframe(final_df[summary_cols + extra_cols], use_container_width=True)
 
         # Zapis do session_state dla eksportów
         st.session_state["plan_df"] = final_df.copy()
@@ -920,8 +979,12 @@ else:
         backlog_df.loc[wmask, 'Wyklucz_następnym_razem'] = True
     csv_buffer3 = io.StringIO()
     backlog_df.to_csv(csv_buffer3, index=False, encoding='utf-8')
-    st.download_button("🗂️ Pobierz Backlog (CSV do następnej analizy)", data=csv_buffer3.getvalue().encode('utf-8-sig'),
-                       file_name="backlog_planer.csv", mime="text/csv")
+    st.download_button(
+        "🗂️ Pobierz Backlog (CSV do następnej analizy)",
+        data=csv_buffer3.getvalue().encode('utf-8-sig'),
+        file_name="backlog_planer.csv",
+        mime="text/csv"
+    )
 
     # 3) Google Sheets
     if st.button("Wyślij do Google Sheets (z kolorami)", key="export_gs"):
