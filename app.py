@@ -96,16 +96,19 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
     if len(keywords_df) == 0:
         return keywords_df
 
+    # Ujednolicenie wolumenu
     if 'Volume' not in keywords_df.columns and 'Wolumen' not in keywords_df.columns:
         keywords_df['Wolumen'] = 0
     elif 'Volume' in keywords_df.columns and 'Wolumen' not in keywords_df.columns:
         keywords_df['Wolumen'] = keywords_df['Volume']
     ensure_numeric(keywords_df, ['Wolumen', 'Volume'])
 
+    # Normalizacja wektorów
     embeddings_array = np.array(embeddings, dtype=np.float32)
     norms = np.linalg.norm(embeddings_array, axis=1, keepdims=True)
     embeddings_array = embeddings_array / np.clip(norms, 1e-12, None)
 
+    # HDBSCAN
     clusterer = hdbscan.HDBSCAN(
         min_cluster_size=min_cluster_size,
         min_samples=min_samples,
@@ -114,51 +117,59 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
         prediction_data=True
     )
     cluster_labels = clusterer.fit_predict(embeddings_array)
+    keywords_df = keywords_df.copy()
     keywords_df['Klaster_ID'] = cluster_labels
 
+    # -1 → outliery; zamień na nowe, unikalne ID
     outlier_mask = keywords_df['Klaster_ID'] == -1
     if outlier_mask.any():
         max_cluster_id = keywords_df['Klaster_ID'].max()
         start = 0 if max_cluster_id == -1 else (max_cluster_id + 1)
         unique_outlier_ids = range(start, start + outlier_mask.sum())
         keywords_df.loc[outlier_mask, 'Klaster_ID'] = list(unique_outlier_ids)
-        # bezpieczne ustawienie typu logicznego (bez FutureWarning)
         if 'Jest_Outlier' not in keywords_df.columns:
-            keywords_df['Jest_Outlier'] = pd.Series([False] * len(keywords_df), index=keywords_df.index, dtype='boolean')
-        keywords_df['Jest_Outlier'] = keywords_df['Jest_Outlier'].astype('boolean')
+            keywords_df['Jest_Outlier'] = False
         keywords_df.loc[outlier_mask, 'Jest_Outlier'] = True
 
-    # upewnij się, że kolumna istnieje i ma typ logiczny
     if 'Jest_Outlier' not in keywords_df.columns:
-        keywords_df['Jest_Outlier'] = pd.Series([False] * len(keywords_df), index=keywords_df.index, dtype='boolean')
-    keywords_df['Jest_Outlier'] = keywords_df['Jest_Outlier'].astype('boolean').fillna(False)
+        keywords_df['Jest_Outlier'] = False
+    keywords_df['Jest_Outlier'] = keywords_df['Jest_Outlier'].fillna(False)
 
     probabilities = clusterer.probabilities_ if hasattr(clusterer, 'probabilities_') else np.ones(len(keywords_df))
     keywords_df['Cluster_Probability'] = probabilities
 
+    # HEAD w klastrze
     def get_head_keyword(group):
         if len(group) == 0:
             return group
         keyword_col = 'Keyword' if 'Keyword' in group.columns else 'Słowo kluczowe'
+        group = group.copy()
         if len(group) == 1:
-            group = group.copy()
             group['HEAD_Keyword'] = group[keyword_col].iloc[0]
             group['Typ_w_klastrze'] = 'HEAD'
             group['Liczba_fraz_w_klastrze'] = 1
             return group
-        group = group.copy()
-        if 'Wolumen' in group.columns:
-            group['_score'] = group['Wolumen'] * (group['Cluster_Probability'] + 0.1)
-            head_idx = group['_score'].idxmax()
-            group.drop('_score', axis=1, inplace=True)
-            group['HEAD_Keyword'] = group.loc[head_idx, keyword_col]
-            group['Typ_w_klastrze'] = 'RELATED'
-            group.loc[head_idx, 'Typ_w_klastrze'] = 'HEAD'
-            group['Liczba_fraz_w_klastrze'] = len(group)
+        group['_score'] = group['Wolumen'] * (group['Cluster_Probability'] + 0.1)
+        head_idx = group['_score'].idxmax()
+        group.drop('_score', axis=1, inplace=True)
+        group['HEAD_Keyword'] = group.loc[head_idx, keyword_col]
+        group['Typ_w_klastrze'] = 'RELATED'
+        group.loc[head_idx, 'Typ_w_klastrze'] = 'HEAD'
+        group['Liczba_fraz_w_klastrze'] = len(group)
         return group
 
-    keywords_df = keywords_df.groupby('Klaster_ID', group_keys=False).apply(get_head_keyword, include_groups=False)
+    # Uwaga: bez include_groups (żeby nie zgubić kolumny Klaster_ID)
+    tmp = keywords_df.groupby('Klaster_ID', group_keys=False).apply(get_head_keyword)
 
+    # Jeżeli Klaster_ID trafił do indeksu — przywróć go jako kolumnę
+    if 'Klaster_ID' not in tmp.columns:
+        if isinstance(tmp.index, pd.MultiIndex) and 'Klaster_ID' in tmp.index.names:
+            tmp = tmp.reset_index(level='Klaster_ID')
+        elif tmp.index.name == 'Klaster_ID':
+            tmp = tmp.reset_index()
+    keywords_df = tmp
+
+    # Jakość klastra = średnia z prawdopodobieństw
     def calculate_cluster_quality(group):
         if len(group) <= 1:
             return group
@@ -166,8 +177,19 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
         group['Cluster_Quality'] = group['Cluster_Probability'].mean()
         return group
 
-    keywords_df = keywords_df.groupby('Klaster_ID', group_keys=False).apply(calculate_cluster_quality, include_groups=False)
-    keywords_df['Cluster_Quality'] = keywords_df.get('Cluster_Quality', 1.0)
+    tmp2 = keywords_df.groupby('Klaster_ID', group_keys=False).apply(calculate_cluster_quality)
+
+    # Ponownie dopilnuj, by Klaster_ID był kolumną
+    if 'Klaster_ID' not in tmp2.columns:
+        if isinstance(tmp2.index, pd.MultiIndex) and 'Klaster_ID' in tmp2.index.names:
+            tmp2 = tmp2.reset_index(level='Klaster_ID')
+        elif tmp2.index.name == 'Klaster_ID':
+            tmp2 = tmp2.reset_index()
+
+    keywords_df = tmp2
+    if 'Cluster_Quality' not in keywords_df.columns:
+        keywords_df['Cluster_Quality'] = 1.0
+
     return keywords_df
 
 def detect_search_intent(keyword):
