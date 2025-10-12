@@ -18,11 +18,13 @@ warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"hdbscan\.robu
 # Ustawienia strony Streamlit
 # -------------------------------------------------------------
 st.set_page_config(page_title="Planer Treści SEO", layout="wide")
+
 # --- Pamięć wyników między rerunami ---
 if "plan_df" not in st.session_state:
     st.session_state["plan_df"] = None
 if "plan_cols" not in st.session_state:
     st.session_state["plan_cols"] = None
+
 # -------------------------------------------------------------
 # Narzędzia pomocnicze
 # -------------------------------------------------------------
@@ -204,6 +206,32 @@ def detect_search_intent(keyword):
     else:
         return 'Mieszana'
 
+# --- REKOMENDACJA GRUPOWANIA (odporna na NaN/teksty) ---
+def _safe_int(x, default=1):
+    try:
+        if pd.isna(x):
+            return default
+        return int(float(x))
+    except Exception:
+        return default
+
+def _safe_float(x, default=1.0):
+    try:
+        if pd.isna(x):
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+def _reco(row: pd.Series) -> str:
+    size_ = _safe_int(row.get('Liczba_fraz_w_klastrze', np.nan), default=1)
+    qual_ = _safe_float(row.get('Cluster_Quality', np.nan), default=1.0)
+    if size_ >= 4 and qual_ >= 0.60:
+        return "Jeden artykuł"
+    if size_ <= 2 or qual_ < 0.45:
+        return "Osobne wpisy"
+    return "Do decyzji"
+
 def classify_article_type(keyword: str, cluster_size: int, intent: str) -> str:
     """
     Zwraca typ treści: 'Ranking/Lista', 'Porównanie', 'Poradnik/How-to',
@@ -249,10 +277,8 @@ def compute_priority_bucket(series: pd.Series) -> pd.Series:
     """
     if series.empty:
         return series
-    # zbuduj rangi malejąco po score (większy score = wyższy priorytet)
     ranks = series.rank(method="min", ascending=False)
-    deciles = pd.qcut(ranks, 10, labels=False, duplicates='drop')  # 0..9
-    # zamiana 0..9 -> 1..10 (1 najwyższy)
+    deciles = pd.qcut(ranks, 10, labels=False, duplicates='drop')  # 0..9 (lub mniej przy małych próbach)
     return (deciles + 1)
 
 def find_first_competitor_url(row):
@@ -578,7 +604,7 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
             if position_col:
                 df_ranking[position_col] = pd.to_numeric(df_ranking[position_col], errors='coerce').fillna(0).astype(int)
 
-            st.info(f"Wczytano {len(df_gap)} słów kluczowych, {len(df_articles)} artykułów i {len(df_ranking)} rankingowych słów kluczowych.")
+            st.info(f"Wczytano {len(df_gap)} słów kluczowych, {len[df_articles]} artykułów i {len(df_ranking)} rankingowych słów kluczowych.")
         except Exception as e:
             st.error(f"Błąd podczas wczytywania plików CSV: {e}")
             st.stop()
@@ -692,7 +718,6 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                     result['Cluster_Probability'] = round(float(row_dict.get('Cluster_Probability', 1.0)), 3)
                     result['Cluster_Quality'] = round(float(row_dict.get('Cluster_Quality', 1.0)), 3)
 
-                # typ artykułu
                 _cluster_size_for_type = int(result.get('Liczba_fraz_w_klastrze', 1) or 1)
                 result['Typ_artykułu'] = classify_article_type(keyword, _cluster_size_for_type, intent)
 
@@ -710,95 +735,26 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         else:
             df_results['Grupa_tematyczna'] = df_results['Słowo kluczowe']
 
-        # Rekomendacja grupowania (prosta, zrozumiała)
-        def _reco(row):
-            size_ = int(row.get('Liczba_fraz_w_klastrze', 1) or 1)
-            qual_ = float(row.get('Cluster_Quality', 1.0) or 1.0)
-            if size_ >= 4 and qual_ >= 0.6:
-                return "Jeden artykuł"
-            if size_ <= 2 or qual_ < 0.45:
-                return "Osobne wpisy"
-            return "Do decyzji"
-        df_results['Rekomendacja_grupowania'] = df_results.apply(_reco, axis=1)
-
-        # Frazy_w_klastrze_TOP5 (podgląd)
-        if enable_clustering and 'Klaster_ID' in df_results.columns:
-            top5_map = {}
-            # zbuduj mapę: klaster -> top 5 fraz po wolumenie (lub po prostu pierwsze 5)
-            for cid, g in df_results.groupby('Klaster_ID'):
-                try:
-                    gg = g.sort_values('Wolumen', ascending=False)
-                except Exception:
-                    gg = g
-                top5_map[cid] = ", ".join(gg['Słowo kluczowe'].tolist()[:5])
-            df_results['Frazy_w_klastrze_TOP5'] = df_results['Klaster_ID'].map(top5_map).fillna('-')
-        else:
-            df_results['Frazy_w_klastrze_TOP5'] = '-'
-
-        # Tytuły dla HEAD-ów „Nowy temat”
-        if enable_clustering:
-            df_new_topics = df_results[
-                (df_results['Status'] == 'Nowy temat') &
-                (df_results['Typ_w_klastrze'] == 'HEAD')
-            ].copy()
-        else:
-            df_new_topics = df_results[df_results['Status'] == 'Nowy temat'].copy()
-
-        if not df_new_topics.empty:
-            df_to_process = df_new_topics.sort_values(by='Priorytet_Score', ascending=False).head(num_to_generate)
-            st.info(f"Generuję propozycje tytułów dla {len(df_to_process)} najważniejszych nowych tematów...")
-            df_gap_indexed = df_gap.set_index('Keyword')
-            df_to_process['Competitor URL'] = df_to_process['Słowo kluczowe'].map(
-                df_gap_indexed.apply(find_first_competitor_url, axis=1)
-            )
-            progress_bar = st.progress(0, text="Generowanie tytułów (GPT-4o)...")
-            generated_titles_data = []
-            for i, (idx, row) in enumerate(df_to_process.iterrows()):
-                related_keywords = ""
-                if enable_clustering and row.get('Liczba_fraz_w_klastrze', 1) > 1:
-                    related = df_results[
-                        (df_results['Klaster_ID'] == row['Klaster_ID']) &
-                        (df_results['Typ_w_klastrze'] == 'RELATED')
-                    ]['Słowo kluczowe'].tolist()
-                    related_keywords = ", ".join(related[:5])
-                titles = generate_titles(
-                    openai_api_key,
-                    row['Słowo kluczowe'],
-                    row['Wolumen'],
-                    row.get('Competitor URL', 'Brak'),
-                    related_keywords
-                )
-                generated_titles_data.append({
-                    'Słowo kluczowe': row['Słowo kluczowe'],
-                    'Propozycja_tematu_1': titles[0],
-                    'Propozycja_tematu_2': titles[1],
-                    'Propozycja_tematu_3': titles[2]
-                })
-                progress_bar.progress((i + 1) / len(df_to_process), text=f"Generowanie tytułów ({i+1}/{len(df_to_process)})")
-            if generated_titles_data:
-                df_titles = pd.DataFrame(generated_titles_data)
-                df_results = pd.merge(df_results, df_titles, on='Słowo kluczowe', how='left')
-
         # --- Ujednolicenie typów i uzupełnienie braków (zawsze) ---
         force_int_cols = ['Wolumen', 'Aktualna_pozycja', 'Liczba_fraz_w_klastrze', 'Klaster_ID', 'Priorytet']
         for c in force_int_cols:
             if c in df_results.columns:
                 df_results[c] = pd.to_numeric(df_results[c], errors='coerce').fillna(0).astype(int)
 
-        # Najpierw rzutujemy na float, potem czyścimy Inf/NaN -> 0.0
         force_float_cols = ['Podobieństwo', 'Cluster_Probability', 'Cluster_Quality', 'Priorytet_Score']
         for c in force_float_cols:
             if c in df_results.columns:
                 df_results[c] = pd.to_numeric(df_results[c], errors='coerce')
                 df_results[c] = df_results[c].replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-        # Dopnij typ logiczny (ważne, by nie mieszać bool ze stringami)
         if 'Jest_Outlier' in df_results.columns:
             df_results['Jest_Outlier'] = df_results['Jest_Outlier'].fillna(False).astype(bool)
 
-        # Na końcu tylko tekstowe kolumny uzupełniamy '-'
         obj_cols = df_results.select_dtypes(include=['object']).columns
         df_results[obj_cols] = df_results[obj_cols].fillna('-')
+
+        # Rekomendacja grupowania (po czyszczeniu typów)
+        df_results['Rekomendacja_grupowania'] = df_results.apply(_reco, axis=1)
 
         st.success("✅ Analiza zakończona!")
 
@@ -823,29 +779,28 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         )
 
         # Widok domyślny – biznesowy
-        show_advanced = st.checkbox("Pokaż metryki techniczne (HDBSCAN, outliery, prawdopodobieństwo)", value=False, key="show_adv")
+        show_advanced = st.checkbox(
+            "Pokaż metryki techniczne (HDBSCAN, outliery, prawdopodobieństwo)",
+            value=False,
+            key="show_adv"
+        )
 
+        # =================== (UWAGA: ten blok musi być wewnątrz if-button) ===================
         cols_order = [
             'Priorytet',
-            'Grupa_tematyczna',
-            'Słowo kluczowe',
-            'Wolumen',
-            'Status',
-            'Rekomendacja_grupowania',
-            'Typ_artykułu',
-            'Frazy_w_klastrze_TOP5',
-            'Akcja / Dopasowany URL',
-            'Najbliższy_artykuł',
-            'Najbliższy_tytuł',
-            'Intencja',
-            'Aktualna_pozycja'
+            'Słowo kluczowe', 'Wolumen', 'Status',
+            'Grupa_tematyczna', 'Typ_artykułu', 'Rekomendacja_grupowania',
+            'Akcja / Dopasowany URL', 'Najbliższy_artykuł', 'Podobieństwo',
+            'Intencja', 'Aktualna_pozycja'
         ]
         if show_advanced:
             cols_order.extend([
                 'Klaster_ID', 'HEAD_Keyword', 'Typ_w_klastrze', 'Liczba_fraz_w_klastrze',
-                'Jest_Outlier', 'Cluster_Probability', 'Cluster_Quality', 'Podobieństwo', 'Priorytet_Score'
+                'Frazy_w_klastrze_TOP5',
+                'Jest_Outlier', 'Cluster_Probability', 'Cluster_Quality', 'Priorytet_Score'
             ])
         cols_order.extend(['Propozycja_tematu_1', 'Propozycja_tematu_2', 'Propozycja_tematu_3'])
+        # =====================================================================================
 
         existing_cols = [c for c in cols_order if c in df_results_sorted.columns]
 
@@ -862,11 +817,22 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         # Przygotuj wersję do WYŚWIETLENIA
         display_df = df_results_sorted.copy()
 
-        # Mapuj boolean na czytelny tekst tylko do WIDOKU (pod spodem zostaje bool)
+        # Frazy_w_klastrze_TOP5 (podgląd — zbuduj dopiero tutaj, aby mieć pełny set)
+        if enable_clustering and 'Klaster_ID' in display_df.columns and 'Frazy_w_klastrze_TOP5' not in display_df.columns:
+            top5_map = {}
+            for cid, g in display_df.groupby('Klaster_ID'):
+                try:
+                    gg = g.sort_values('Wolumen', ascending=False)
+                except Exception:
+                    gg = g
+                top5_map[cid] = ", ".join(gg['Słowo kluczowe'].tolist()[:5])
+            display_df['Frazy_w_klastrze_TOP5'] = display_df['Klaster_ID'].map(top5_map).fillna('-')
+        elif 'Frazy_w_klastrze_TOP5' not in display_df.columns:
+            display_df['Frazy_w_klastrze_TOP5'] = '-'
+
         if 'Jest_Outlier' in display_df.columns:
             display_df['Jest_Outlier'] = display_df['Jest_Outlier'].map({True: 'TAK', False: ''})
 
-        # Uzupełnij tekstowe kolumny '-'
         _obj_cols = display_df.select_dtypes(include=['object']).columns
         display_df[_obj_cols] = display_df[_obj_cols].fillna('-')
 
