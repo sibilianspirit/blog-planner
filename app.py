@@ -9,9 +9,8 @@ import time
 import math
 import hdbscan
 import numpy as np
-import gspread
 import warnings
-import difflib  # <= NOWE
+import difflib
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"hdbscan\.robust_single_linkage_")
 
@@ -29,44 +28,10 @@ if "plan_cols" not in st.session_state:
 # -------------------------------------------------------------
 # Narzędzia pomocnicze
 # -------------------------------------------------------------
-def colnum_to_letter(n: int) -> str:
-    s = ""
-    while n > 0:
-        n, r = divmod(n - 1, 26)
-        s = chr(r + 65) + s
-    return s
-
 def ensure_numeric(df: pd.DataFrame, cols):
     for c in cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0).astype(int)
-
-def _get_gspread_client():
-    """Autoryzacja gspread z secrets + fix dla \\n"""
-    try:
-        creds_dict = st.secrets["gcp_service_account"]
-    except Exception:
-        st.error("Brak poświadczeń Google w st.secrets['gcp_service_account']. Dodaj JSON konta serwisowego do sekretów.")
-        return None
-    pk = creds_dict.get("private_key", "")
-    if "\\n" in pk and "\n" not in pk:
-        creds_dict["private_key"] = pk.replace("\\n", "\n")
-    try:
-        return gspread.service_account_from_dict(creds_dict)
-    except Exception as e:
-        st.error(f"Nie można zautoryzować gspread: {e}")
-        return None
-
-def _extract_spreadsheet_id(maybe_url_or_id: str) -> str:
-    s = maybe_url_or_id.strip()
-    if not s:
-        return ""
-    if "https://docs.google.com" in s:
-        try:
-            return s.split("/d/")[1].split("/")[0]
-        except Exception:
-            return s
-    return s
 
 # -------------------------------------------------------------
 # Funkcje OpenAI / Embeddings / Klasteryzacja
@@ -230,7 +195,7 @@ _PL_MAP = str.maketrans({
     "Ą":"a","Ć":"c","Ę":"e","Ł":"l","Ń":"n","Ó":"o","Ś":"s","Ż":"z","Ź":"z"
 })
 _STOPWORDS = set("""
-do dla w na z za o od u po przy pod nad bez jak co to jest czym 
+do dla w na z za o od u po przy pod nad bez jak co to jest czym
 dla dzieci dziecko dzieciaki dzieciecy dziecieca dziecie
 """.split())
 
@@ -267,10 +232,6 @@ def _reco(row: pd.Series) -> str:
     return "Do decyzji"
 
 def classify_article_type(keyword: str, cluster_size: int, intent: str) -> str:
-    """
-    Zwraca typ treści: 'Ranking/Lista', 'Porównanie', 'Poradnik/How-to',
-    'Definicja/Co to jest', 'Recenzja/Opinie', 'Temat ogólny'.
-    """
     k = (keyword or "").lower()
     if any(x in k for x in ["ranking", "najlepsze", "top ", "top-", "top_", "top10", "top 10", "polecane", "lista", "zestawienie"]):
         return "Ranking/Lista"
@@ -305,20 +266,12 @@ def calculate_priority_score(row):
     return round(priority, 2)
 
 def compute_priority_bucket(series: pd.Series) -> pd.Series:
-    """
-    Zamienia Priorytet_Score na 1..10 (1 = najwyższy), stabilnie nawet przy duplikatach/małych próbach.
-    Ignoruje wartości NaN, pozostawiając je jako NaN.
-    """
     n = int(series.shape[0])
     if n == 0:
         return series
-    ranks = series.rank(method="first", ascending=False)  # rank() poprawnie obsługuje NaN, zostawiając je jako NaN
+    ranks = series.rank(method="first", ascending=False)
     step = max(n / 10.0, 1.0)
-
-    # Oblicz bucket, ale nie konwertuj na int. Wynik będzie float z NaN.
     buckets = np.ceil(ranks / step)
-
-    # Zwróć buckets po przycięciu. Główny skrypt zajmie się konwersją do 'Int64'.
     return buckets.clip(1, 10)
 
 def find_first_competitor_url(row):
@@ -391,158 +344,10 @@ def validate_api_key(api_key):
         return False
 
 # -------------------------------------------------------------
-# Eksport do Google Sheets (update istniejącego lub create do folderu)
-# -------------------------------------------------------------
-def export_df_to_google_sheets_with_colors(
-    df: pd.DataFrame,
-    columns_in_order,
-    title="Plan treści HDBSCAN",
-    existing_spreadsheet_id_or_url: str = "",
-    folder_id: str = ""
-):
-    """
-    Jeśli podasz existing_spreadsheet_id_or_url -> zapisze do tego pliku (tworzy/aktualizuje zakładkę 'Plan').
-    W przeciwnym razie spróbuje utworzyć nowy plik (jeśli podano folder_id, to w tym folderze).
-    """
-    gc = _get_gspread_client()
-    if gc is None:
-        return None
-
-    sh = None
-    ss_id = _extract_spreadsheet_id(existing_spreadsheet_id_or_url)
-
-    try:
-        if ss_id:
-            sh = gc.open_by_key(ss_id)
-        else:
-            if folder_id.strip():
-                sh = gc.create(title, folder_id=folder_id.strip())
-            else:
-                sh = gc.create(title)
-    except Exception as e:
-        st.error(f"Nie można otworzyć/utworzyć Spreadsheet: {e}")
-        return None
-
-    # Worksheet "Plan"
-    try:
-        try:
-            ws = sh.worksheet("Plan")
-            ws.clear()
-        except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title="Plan", rows="1000", cols="26")
-    except Exception as e:
-        st.error(f"Problem z arkuszem 'Plan': {e}")
-        return None
-
-    # Dane
-    try:
-        data = df[columns_in_order].copy()
-        data = data.replace([np.inf, -np.inf], np.nan)
-        data = data.where(pd.notna(data), "")
-        ws.update([data.columns.tolist()] + data.astype(object).values.tolist())
-    except Exception as e:
-        st.error(f"Nie udało się zaktualizować danych w arkuszu: {e}")
-        return None
-
-    # Formatowanie warunkowe wg 'Status'
-    try:
-        n_rows = data.shape[0] + 1
-        n_cols = data.shape[1]
-        if 'Status' not in data.columns:
-            st.warning("Nie znaleziono kolumny 'Status' – pomijam kolorowanie.")
-            return sh.url
-
-        status_col_idx_1 = data.columns.get_loc('Status') + 1
-        sheet_id = ws._properties['sheetId']
-        table_range = {
-            "sheetId": sheet_id,
-            "startRowIndex": 1,
-            "endRowIndex": n_rows,
-            "startColumnIndex": 0,
-            "endColumnIndex": n_cols
-        }
-        col_green = {"red": 0.91, "green": 0.96, "blue": 0.91}
-        col_orange = {"red": 1.00, "green": 0.95, "blue": 0.88}
-        col_red = {"red": 1.00, "green": 0.92, "blue": 0.93}
-
-        status_col_letter = colnum_to_letter(status_col_idx_1)
-        base_cell = f"${status_col_letter}2"
-
-        requests = [
-            {
-                "autoResizeDimensions": {
-                    "dimensions": {
-                        "sheetId": sheet_id,
-                        "dimension": "COLUMNS",
-                        "startIndex": 0,
-                        "endIndex": n_cols
-                    }
-                }
-            },
-            {
-                "addConditionalFormatRule": {
-                    "rule": {
-                        "ranges": [table_range],
-                        "booleanRule": {
-                            "condition": {
-                                "type": "CUSTOM_FORMULA",
-                                "values": [
-                                    {"userEnteredValue": f"={base_cell}=\"Nowy temat\""}
-                                ]
-                            },
-                            "format": {"backgroundColor": col_green}
-                        }
-                    },
-                    "index": 0
-                }
-            },
-            {
-                "addConditionalFormatRule": {
-                    "rule": {
-                        "ranges": [table_range],
-                        "booleanRule": {
-                            "condition": {
-                                "type": "TEXT_CONTAINS",
-                                "values": [
-                                    {"userEnteredValue": "TOP1"}
-                                ]
-                            },
-                            "format": {"backgroundColor": col_orange}
-                        }
-                    },
-                    "index": 0
-                }
-            },
-            {
-                "addConditionalFormatRule": {
-                    "rule": {
-                        "ranges": [table_range],
-                        "booleanRule": {
-                            "condition": {
-                                "type": "TEXT_CONTAINS",
-                                "values": [
-                                    {"userEnteredValue": "Nie rankuje"}
-                                ]
-                            },
-                            "format": {"backgroundColor": col_red}
-                        }
-                    },
-                    "index": 0
-                }
-            }
-        ]
-
-        sh.batch_update({"requests": requests})
-    except Exception as e:
-        st.warning(f"Nie udało się ustawić formatowania warunkowego: {e}")
-
-    return sh.url
-
-# -------------------------------------------------------------
 # UI
 # -------------------------------------------------------------
-st.title("🚀 Planer Treści SEO [Wersja HDBSCAN v9 - ULTIMATE]")
-st.markdown("✨ Zaawansowana klasteryzacja z HDBSCAN, analiza intencji, agenda priorytetów 1–10 oraz propozycje formatów treści.")
+st.title("🚀 Planer Treści SEO [Wersja HDBSCAN v10 - Skondensowana]")
+st.markdown("✨ Zaawansowana klasteryzacja z HDBSCAN, agregacja fraz i pytań do tematów głównych.")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -563,40 +368,6 @@ with col2:
     my_articles_file = st.file_uploader("2. Wgraj plik CSV z listą swoich artykułów", type="csv")
     ranking_file = st.file_uploader("3. Wgraj plik CSV z aktualnym rankingiem", type="csv")
 
-# Pola dla eksportu (używane też przez test połączenia)
-st.markdown("### ☁️ Ustawienia eksportu do Google Sheets")
-existing_sheet_input = st.text_input(
-    "Istniejący Spreadsheet (URL lub ID) – zalecane, gdy brakuje miejsca w Drive",
-    value="",
-    key="existing_spreadsheet_id"
-)
-target_folder_id = st.text_input(
-    "Opcjonalnie: Folder ID (jeśli chcesz tworzyć nowe pliki w konkretnym folderze z wolnym miejscem)",
-    value="",
-    key="target_folder_id"
-)
-
-# --- PRZYCISK TESTOWY: szybkie sprawdzenie połączenia i uprawnień ---
-if st.button("🔍 Test połączenia z Google Sheets (A1 -> timestamp)", key="gs_probe"):
-    try:
-        gc = _get_gspread_client()
-        if gc is None:
-            st.stop()
-        sheet_id_or_url = existing_sheet_input.strip()
-        if not sheet_id_or_url:
-            st.error("Podaj najpierw Istniejący Spreadsheet (URL lub ID), aby wykonać test.")
-        else:
-            spreadsheet_id = _extract_spreadsheet_id(sheet_id_or_url)
-            sh = gc.open_by_key(spreadsheet_id)
-            try:
-                ws = sh.worksheet("Plan")
-            except gspread.WorksheetNotFound:
-                ws = sh.add_worksheet(title="Plan", rows="1000", cols="26")
-            import datetime as _dt
-            ws.update_acell("A1", f"Połączenie OK @ {_dt.datetime.now().isoformat(timespec='seconds')}")
-            st.success(f"OK ✅ Zapisano timestamp do A1. Arkusz: {sh.url}")
-    except Exception as e:
-        st.exception(e)
 
 # -------------------------------------------------------------
 # Logika Aplikacji
@@ -769,6 +540,46 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         else:
             df_results['Grupa_tematyczna'] = df_results['Słowo kluczowe']
 
+        # Rekomendacja grupowania (przed czyszczeniem typów)
+        if 'HEAD_Keyword' in df_results.columns:
+            df_results['Rekomendacja_grupowania'] = df_results.apply(_reco, axis=1)
+
+        # =================================================================
+        # NOWA SEKCJA: Agregacja fraz RELATED i Pytań do wierszy HEAD
+        # =================================================================
+        if enable_clustering and 'Klaster_ID' in df_results.columns:
+            st.info("🔄 Agreguję frazy RELATED i pytania do głównych tematów (HEAD)...")
+
+            aggregated_data = []
+            for cluster_id, group in df_results.groupby('Klaster_ID'):
+                head_row = group[group['Typ_w_klastrze'] == 'HEAD']
+                related_rows = group[group['Typ_w_klastrze'] == 'RELATED']
+
+                if not head_row.empty:
+                    head_keyword = head_row.iloc[0]['Słowo kluczowe']
+                    related_keywords_sorted = related_rows.sort_values('Wolumen', ascending=False)['Słowo kluczowe'].tolist()
+                    related_keywords_str = "\n".join(related_keywords_sorted)
+                    questions = group[group['Intencja'] == 'Informacyjna'].sort_values('Wolumen', ascending=False)['Słowo kluczowe'].tolist()
+                    if head_keyword in questions:
+                        questions.remove(head_keyword)
+                    questions_str = "\n".join(questions)
+                    aggregated_data.append({
+                        'Słowo kluczowe': head_keyword,
+                        'Frazy_RELATED': related_keywords_str,
+                        'Powiazane_pytania': questions_str,
+                        'Calkowity_wolumen_klastra': group['Wolumen'].sum()
+                    })
+
+            if aggregated_data:
+                df_aggregated = pd.DataFrame(aggregated_data)
+                df_results = pd.merge(df_results, df_aggregated, on='Słowo kluczowe', how='left')
+                df_results = df_results[df_results['Typ_w_klastrze'] == 'HEAD'].reset_index(drop=True)
+                if 'Calkowity_wolumen_klastra' in df_results.columns:
+                     df_results['Wolumen'] = df_results['Calkowity_wolumen_klastra']
+                     df_results['Priorytet_Score'] = df_results.apply(calculate_priority_score, axis=1)
+                     df_results['Priorytet'] = compute_priority_bucket(df_results['Priorytet_Score']).astype('Int64')
+        # =================================================================
+
         # --- Ujednolicenie typów i uzupełnienie braków (zawsze) ---
         force_int_cols = ['Wolumen', 'Aktualna_pozycja', 'Liczba_fraz_w_klastrze', 'Klaster_ID', 'Priorytet']
         for c in force_int_cols:
@@ -787,17 +598,9 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         obj_cols = df_results.select_dtypes(include=['object']).columns
         df_results[obj_cols] = df_results[obj_cols].fillna('-')
 
-        # Rekomendacja grupowania (po czyszczeniu typów)
-        df_results['Rekomendacja_grupowania'] = df_results.apply(_reco, axis=1)
 
         # ===== Generowanie tytułów dla TOP N nowych tematów (HEAD) =====
-        if enable_clustering:
-            df_new_topics = df_results[
-                (df_results['Status'] == 'Nowy temat') &
-                (df_results['Typ_w_klastrze'] == 'HEAD')
-            ].copy()
-        else:
-            df_new_topics = df_results[df_results['Status'] == 'Nowy temat'].copy()
+        df_new_topics = df_results[df_results['Status'] == 'Nowy temat'].copy()
 
         if not df_new_topics.empty:
             df_to_process = df_new_topics.sort_values(by='Priorytet_Score', ascending=False).head(num_to_generate)
@@ -809,13 +612,8 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
             progress_bar = st.progress(0, text="Generowanie tytułów (GPT-4o)...")
             generated_titles_data = []
             for i, (idx, row) in enumerate(df_to_process.iterrows()):
-                related_keywords = ""
-                if enable_clustering and row.get('Liczba_fraz_w_klastrze', 1) > 1:
-                    related = df_results[
-                        (df_results['Klaster_ID'] == row['Klaster_ID']) &
-                        (df_results['Typ_w_klastrze'] == 'RELATED')
-                    ]['Słowo kluczowe'].tolist()
-                    related_keywords = ", ".join(related[:5])
+                # Używamy już zagregowanych fraz
+                related_keywords = row.get('Frazy_RELATED', '').replace("\n", ", ")
                 titles = generate_titles(
                     openai_api_key,
                     row['Słowo kluczowe'],
@@ -834,7 +632,6 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 df_titles = pd.DataFrame(generated_titles_data)
                 df_results = pd.merge(df_results, df_titles, on='Słowo kluczowe', how='left')
 
-                # PODGLĄD „TOP N – propozycje tytułów”
                 with st.expander(f"📝 Propozycje tytułów (TOP {len(df_to_process)})", expanded=True):
                     preview_cols = ['Słowo kluczowe', 'Wolumen',
                                     'Propozycja_tematu_1', 'Propozycja_tematu_2', 'Propozycja_tematu_3']
@@ -842,7 +639,6 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                         df_results['Słowo kluczowe'].isin(df_to_process['Słowo kluczowe'])
                     ][preview_cols].sort_values('Wolumen', ascending=False)
                     st.dataframe(_titles_preview, use_container_width=True)
-        # ================================================================
 
         st.success("✅ Analiza zakończona!")
 
@@ -860,35 +656,33 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
 
         st.header("📊 Wyniki Analizy i Plan Treści")
 
-        # Sort: najpierw agenda (1..10), potem score i wolumen
         df_results_sorted = df_results.sort_values(
             by=['Priorytet', 'Priorytet_Score', 'Wolumen'],
             ascending=[True, False, False]
         )
 
-        # Widok domyślny – biznesowy
         show_advanced = st.checkbox(
-            "Pokaż metryki techniczne (HDBSCAN, outliery, prawdopodobieństwo)",
+            "Pokaż metryki techniczne (HDBSCAN, outliery, podobieństwo)",
             value=False,
             key="show_adv"
         )
 
-        # =================== (wewnątrz if-button) ===================
+        # Definiowanie kolejności kolumn z nowymi kolumnami
         cols_order = [
             'Priorytet',
             'Słowo kluczowe', 'Wolumen', 'Status',
             'Grupa_tematyczna', 'Typ_artykułu', 'Rekomendacja_grupowania',
+            'Frazy_RELATED', 'Powiazane_pytania', # NOWE KOLUMNY
             'Akcja / Dopasowany URL', 'Najbliższy_artykuł', 'Podobieństwo',
             'Intencja', 'Aktualna_pozycja'
         ]
         if show_advanced:
             cols_order.extend([
-                'Klaster_ID', 'HEAD_Keyword', 'Typ_w_klastrze', 'Liczba_fraz_w_klastrze',
-                'Frazy_w_klastrze_TOP5',
-                'Jest_Outlier', 'Cluster_Probability', 'Cluster_Quality', 'Priorytet_Score'
+                'Klaster_ID', 'Liczba_fraz_w_klastrze', 'Jest_Outlier',
+                'Cluster_Probability', 'Cluster_Quality', 'Priorytet_Score'
             ])
         cols_order.extend(['Propozycja_tematu_1', 'Propozycja_tematu_2', 'Propozycja_tematu_3'])
-        # ============================================================
+
 
         existing_cols = [c for c in cols_order if c in df_results_sorted.columns]
 
@@ -902,21 +696,7 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
                 return ['background-color: #ffebee'] * len(row)
             return [''] * len(row)
 
-        # Przygotuj wersję do WYŚWIETLENIA
         display_df = df_results_sorted.copy()
-
-        # Frazy_w_klastrze_TOP5 (podgląd – budujemy tu, by mieć pełny set)
-        if enable_clustering and 'Klaster_ID' in display_df.columns and 'Frazy_w_klastrze_TOP5' not in display_df.columns:
-            top5_map = {}
-            for cid, g in display_df.groupby('Klaster_ID'):
-                try:
-                    gg = g.sort_values('Wolumen', ascending=False)
-                except Exception:
-                    gg = g
-                top5_map[cid] = ", ".join(gg['Słowo kluczowe'].tolist()[:5])
-            display_df['Frazy_w_klastrze_TOP5'] = display_df['Klaster_ID'].map(top5_map).fillna('-')
-        elif 'Frazy_w_klastrze_TOP5' not in display_df.columns:
-            display_df['Frazy_w_klastrze_TOP5'] = '-'
 
         if 'Jest_Outlier' in display_df.columns:
             display_df['Jest_Outlier'] = display_df['Jest_Outlier'].map({True: 'TAK', False: ''})
@@ -924,7 +704,6 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         _obj_cols = display_df.select_dtypes(include=['object']).columns
         display_df[_obj_cols] = display_df[_obj_cols].fillna('-')
 
-        # Zapisz do session_state, żeby nie znikło po kliknięciu innych przycisków
         st.session_state["plan_df"] = display_df.copy()
         st.session_state["plan_cols"] = existing_cols[:]
 
@@ -937,53 +716,28 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         st.markdown("""
 **Legenda i wskazówki:**
 - **Priorytet**: 1 = najwyższy, 10 = najniższy (agenda działań).
-- **Grupa tematyczna**: nazwa przewodnia (HEAD) dla całego klastra.
-- **Rekomendacja grupowania**:
-  - *Jeden artykuł* – frazy są spójne; zaplanuj jeden, mocny materiał.
-  - *Osobne wpisy* – frazy się rozchodzą; rozbij na kilka treści.
-  - *Do decyzji* – spójność umiarkowana; zależy od strategii i zasobów.
+- **Grupa tematyczna**: Główny temat (`HEAD`) dla całego klastra.
+- **Frazy_RELATED**: Pozostałe frazy z klastra do uwzględnienia w treści (posortowane wg wolumenu).
+- **Powiązane_pytania**: Frazy o intencji informacyjnej, które warto zawrzeć w artykule jako sekcje FAQ lub nagłówki.
 - 🟢 Zielony wiersz: Nowy temat
 - 🟠 Pomarańczowy: Blisko TOP1 (optymalizacja)
 - 🔴 Czerwony: Nie rankuje
 """)
 
-        # Eksport CSV (natychmiast)
+        # Uproszczony eksport CSV
         csv_buffer = io.StringIO()
         display_df[existing_cols].to_csv(csv_buffer, index=False, encoding='utf-8')
         csv_bytes = csv_buffer.getvalue().encode('utf-8-sig')
         st.download_button(
             "📥 Pobierz gotowy plan treści jako CSV",
             csv_bytes,
-            "plan_tresci_hdbscan_ultimate.csv",
+            "plan_tresci_hdbscan_skondensowany.csv",
             "text/csv",
             type="primary"
         )
 
-        # Dodatkowe eksporty
-        colx1, colx2 = st.columns(2)
-        with colx1:
-            if 'Typ_w_klastrze' in df_results_sorted.columns:
-                df_head_only = df_results_sorted[df_results_sorted['Typ_w_klastrze'] == 'HEAD']
-                csv_head_buffer = io.StringIO()
-                df_head_only[existing_cols].to_csv(csv_head_buffer, index=False, encoding='utf-8')
-                csv_head_bytes = csv_head_buffer.getvalue().encode('utf-8-sig')
-                st.download_button(
-                    "📥 Pobierz tylko HEAD keywords",
-                    csv_head_bytes,
-                    "plan_tresci_head_only.csv",
-                    "text/csv"
-                )
-        with colx2:
-            df_priority = df_results_sorted[df_results_sorted['Status'] == 'Nowy temat'].head(50)
-            csv_priority_buffer = io.StringIO()
-            df_priority[existing_cols].to_csv(csv_priority_buffer, index=False, encoding='utf-8')
-            csv_priority_bytes = csv_priority_buffer.getvalue().encode('utf-8-sig')
-            st.download_button(
-                "📥 Pobierz TOP 50 priorytetów",
-                csv_priority_bytes,
-                "plan_tresci_top50.csv",
-                "text/csv"
-            )
+        # Usunięto dodatkowe przyciski pobierania dla uproszczenia
+        # ...
 
         # Dodatkowa analiza
         st.header("📊 Dodatkowa Analiza")
@@ -992,66 +746,19 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
             if 'Intencja' in df_results.columns:
                 intent_counts = df_results['Intencja'].value_counts()
                 st.bar_chart(intent_counts)
-                st.markdown("**Interpretacja:** Dominująca intencja wyszukiwania w analizowanych frazach.")
         with tab2:
             volume_by_status = df_results.groupby('Status')['Wolumen'].sum().sort_values(ascending=False)
             st.bar_chart(volume_by_status)
-            st.markdown("**Interpretacja:** Łączny potencjał ruchu dla każdej kategorii statusu.")
         with tab3:
-            if enable_clustering and 'Cluster_Quality' in df_results.columns and 'Typ_w_klastrze' in df_results.columns:
-                quality_dist = pd.to_numeric(
-                    df_results.loc[df_results['Typ_w_klastrze'] == 'HEAD', 'Cluster_Quality'],
-                    errors='coerce'
-                ).dropna()
+            if enable_clustering and 'Cluster_Quality' in df_results.columns:
+                quality_dist = pd.to_numeric(df_results['Cluster_Quality'], errors='coerce').dropna()
                 if not quality_dist.empty:
                     st.line_chart(quality_dist.sort_values(ascending=False))
                     st.markdown(f"**Średnia jakość klastrów:** {quality_dist.mean():.3f}")
                 weak_clusters = df_results[
-                    (df_results['Typ_w_klastrze'] == 'HEAD') &
                     (pd.to_numeric(df_results['Cluster_Quality'], errors='coerce') < 0.5)
                 ]['Słowo kluczowe'].dropna().tolist()
                 if weak_clusters:
-                    st.warning(f"⚠️ Znaleziono {len(weak_clusters)} klastrów o niskiej spójności. Rozważ ich weryfikację ręczną.")
+                    st.warning(f"⚠️ Znaleziono {len(weak_clusters)} klastrów o niskiej spójności.")
                     with st.expander("Zobacz listę"):
-                        for kw in weak_clusters[:10]:
-                            st.markdown(f"- {kw}")
-
-# =========================================
-# STAŁA SEKCJA EKSPORTU / POBIERANIA (poza analizą)
-# =========================================
-st.subheader("☁️ Eksport / Pobieranie")
-if st.session_state.get("plan_df") is None or st.session_state.get("plan_cols") is None:
-    st.info("Najpierw uruchom analizę, żeby włączyć eksport i pobieranie.")
-else:
-    gs_title_default = f"Plan treści HDBSCAN ({time.strftime('%Y-%m-%d %H:%M')})"
-    gs_title = st.text_input("Tytuł nowego arkusza (dla NOWEGO pliku)", value=gs_title_default, key="gs_title")
-
-    export_df = st.session_state["plan_df"][st.session_state["plan_cols"]].copy()
-    csv_buffer2 = io.StringIO()
-    export_df.to_csv(csv_buffer2, index=False, encoding='utf-8')
-    csv_bytes2 = csv_buffer2.getvalue().encode('utf-8-sig')
-    st.download_button(
-        "📥 Pobierz aktualny plan (CSV)",
-        data=csv_bytes2,
-        file_name="plan_tresci_hdbscan_ultimate.csv",
-        mime="text/csv",
-        type="primary",
-        key="dl_csv_latest"
-    )
-
-    if st.button("Wyślij do Google Sheets (z kolorami)", key="export_gs"):
-        try:
-            with st.spinner("Wysyłam dane do Google Sheets i ustawiam kolorowanie..."):
-                url = export_df_to_google_sheets_with_colors(
-                    st.session_state["plan_df"],
-                    st.session_state["plan_cols"],
-                    title=gs_title,
-                    existing_spreadsheet_id_or_url=existing_sheet_input,
-                    folder_id=target_folder_id
-                )
-            if url:
-                st.success(f"Gotowe! Otwórz arkusz: {url}")
-            else:
-                st.error("Eksport nie zwrócił adresu URL. Sprawdź logi/sekrety.")
-        except Exception as e:
-            st.exception(e)
+                        for kw in weak_clusters[:10]: st.markdown(f"- {kw}")
