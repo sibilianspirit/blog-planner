@@ -191,7 +191,7 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
         return group
 
     # >>> WAŻNE: include_groups=False, aby nie wpadało w przyszłą zmianę Pandas
-    tmp = keywords_df.groupby('Klaster_ID', group_keys=False).apply(get_head_keyword, include_groups=False)
+    tmp = keywords_df.groupby('Klaster_ID', group_keys=False).apply(get_head_keyword)
 
     # Jeżeli Klaster_ID trafił do indeksu — przywróć go jako kolumnę
     if 'Klaster_ID' not in tmp.columns:
@@ -212,7 +212,7 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
         return group
 
     # >>> include_groups=False ponownie
-    tmp2 = keywords_df.groupby('Klaster_ID', group_keys=False).apply(calculate_cluster_quality, include_groups=False)
+    tmp2 = keywords_df.groupby('Klaster_ID', group_keys=False).apply(calculate_cluster_quality)
 
     # Ponownie dopilnuj, by Klaster_ID był kolumną
     if 'Klaster_ID' not in tmp2.columns:
