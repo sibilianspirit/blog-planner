@@ -280,6 +280,49 @@ def classify_article_type(keyword: str, cluster_size: int, intent: str) -> str:
         return "Ranking/Lista"
     return "Temat ogólny"
 
+# === NOWE: kolumny RELATED/pytań tylko dla HEAD ===
+def build_related_columns_for_heads(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Dla każdego klastra: w wierszu HEAD uzupełnia dwie kolumny:
+    - 'Frazy_RELATED'      : HEAD + wszystkie frazy z klastra (jedna pod drugą)
+    - 'Powiązane_pytania'  : frazy w formie pytającej / informacyjnej (jedna pod drugą)
+    """
+    df = df.copy()
+
+    # upewnij się, że kolumny istnieją
+    if 'Frazy_RELATED' not in df.columns:
+        df['Frazy_RELATED'] = ''
+    if 'Powiązane_pytania' not in df.columns:
+        df['Powiązane_pytania'] = ''
+
+    required = {'Klaster_ID', 'HEAD_Keyword', 'Typ_w_klastrze', 'Słowo kluczowe'}
+    if not required.issubset(df.columns):
+        return df  # brak klastrów lub kolumn – nic nie robimy
+
+    q_patterns = ('co to', 'czym jest', 'jak ', 'jaki', 'jakie', 'jaką', 'gdzie', 'kiedy', 'czy')
+
+    for cid, g in df.groupby('Klaster_ID'):
+        head_kw = str(g['HEAD_Keyword'].iloc[0])
+        # wszystkie frazy z klastra; HEAD pierwszy
+        all_kw = pd.unique(g['Słowo kluczowe'].astype(str)).tolist()
+        all_kw_sorted = [head_kw] + [k for k in all_kw if k != head_kw]
+        related_str = "\n".join(all_kw_sorted)
+
+        # pytania z klastra (informacyjne i z wzorcem pytającym)
+        questions = []
+        for k in all_kw:
+            kl = k.lower()
+            if detect_search_intent(k) == 'Informacyjna' and any(p in kl for p in q_patterns):
+                questions.append(k)
+        questions_str = "\n".join(pd.unique(questions).tolist())
+
+        # zapis tylko do wiersza HEAD
+        mask_head = (df['Klaster_ID'] == cid) & (df['Typ_w_klastrze'] == 'HEAD')
+        df.loc[mask_head, 'Frazy_RELATED'] = related_str
+        df.loc[mask_head, 'Powiązane_pytania'] = questions_str
+
+    return df
+
 def calculate_priority_score(row):
     volume_score = min((row.get('Wolumen', 0) or 0) / 1000, 100)
     position = int(row.get('Aktualna_pozycja', 0) or 0)
@@ -779,6 +822,15 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         df_results['Wyklucz_następnym_razem'] = False
         df_results['Wygenerowano_tytuł'] = False
 
+        # === NOWE: Frazy RELATED i pytania w wierszu HEAD (jeśli mamy klastrowanie) ===
+        if enable_clustering and {'Klaster_ID','HEAD_Keyword','Typ_w_klastrze'}.issubset(df_results.columns):
+            df_results = build_related_columns_for_heads(df_results)
+        else:
+            if 'Frazy_RELATED' not in df_results.columns:
+                df_results['Frazy_RELATED'] = ''
+            if 'Powiązane_pytania' not in df_results.columns:
+                df_results['Powiązane_pytania'] = ''
+
         st.success("✅ Analiza zakończona!")
 
         # Sort domyślny
@@ -814,7 +866,9 @@ else:
     # Widok/kolumny
     view_cols = [
         'Priorytet','Priorytet_Score','Słowo kluczowe','Wolumen','Status',
-        'Grupa_tematyczna','Typ_artykułu','Rekomendacja_grupowania',
+        'Grupa_tematyczna',
+        'Frazy_RELATED','Powiązane_pytania',  # <── NOWE kolumny w widoku
+        'Typ_artykułu','Rekomendacja_grupowania',
         'Akcja / Dopasowany URL','Najbliższy_artykuł','Podobieństwo',
         'Intencja','Aktualna_pozycja',
         'Wybrane_do_tytułów','Wygenerowano_tytuł','Wyklucz_następnym_razem',
@@ -823,7 +877,7 @@ else:
     df_view = st.session_state["df_results"].copy()
     for c in view_cols:
         if c not in df_view.columns:
-            df_view[c] = '-' if c.startswith("Propozycja") else (False if "Wy" in c else '-')
+            df_view[c] = '-' if c.startswith("Propozycja") or c in ('Frazy_RELATED','Powiązane_pytania') else (False if "Wy" in c else '-')
 
     # Edycja w formularzu – zapis stabilny
     with st.form("plan_editor_form", clear_on_submit=False):
@@ -929,6 +983,7 @@ else:
     show_cols = [
         'Priorytet','Słowo kluczowe','Wolumen','Status',
         'Typ_artykułu','Rekomendacja_grupowania',
+        'Frazy_RELATED','Powiązane_pytania',  # <── NOWE w podsumowaniu
         'Propozycja_tematu_1','Propozycja_tematu_2','Propozycja_tematu_3',
         'Wyklucz_następnym_razem','Wygenerowano_tytuł'
     ]
