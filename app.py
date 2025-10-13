@@ -72,6 +72,35 @@ def _extract_spreadsheet_id(maybe_url_or_id: str) -> str:
             return s
     return s
 
+def read_csv_robust(uploaded_file, **base_kwargs) -> pd.DataFrame:
+    """
+    Czyta CSV z różnymi kodowaniami i separatorami.
+    Obsługa: utf-8, utf-8-sig, utf-16/le/be, cp1250, latin1 oraz seps: ',', ';', '\\t', autodetekcja.
+    """
+    if uploaded_file is None:
+        raise ValueError("Brak pliku.")
+    raw = uploaded_file.getvalue()
+    encodings = ["utf-8", "utf-8-sig", "utf-16", "utf-16le", "utf-16be", "cp1250", "latin1"]
+    seps = [",", ";", "\t", None]
+    last_err = None
+    for enc in encodings:
+        for sep in seps:
+            try:
+                buf = io.BytesIO(raw)
+                kwargs = dict(base_kwargs)
+                if sep is None:
+                    kwargs.update({"sep": None, "engine": "python"})
+                else:
+                    kwargs.update({"sep": sep})
+                return pd.read_csv(buf, encoding=enc, **kwargs)
+            except Exception as e:
+                last_err = e
+                continue
+    raise RuntimeError(
+        f"Nie udało się wczytać CSV żadnym z próbnych kodowań {encodings} i separatorów {seps}. "
+        f"Ostatni błąd: {last_err}"
+    )
+
 # -------------------------------------------------------------
 # OpenAI / Embeddings / Klasteryzacja
 # -------------------------------------------------------------
@@ -161,7 +190,8 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
         group['Liczba_fraz_w_klastrze'] = len(group)
         return group
 
-    tmp = keywords_df.groupby('Klaster_ID', group_keys=False).apply(get_head_keyword)
+    # >>> WAŻNE: include_groups=False, aby nie wpadało w przyszłą zmianę Pandas
+    tmp = keywords_df.groupby('Klaster_ID', group_keys=False).apply(get_head_keyword, include_groups=False)
 
     # Jeżeli Klaster_ID trafił do indeksu — przywróć go jako kolumnę
     if 'Klaster_ID' not in tmp.columns:
@@ -174,12 +204,15 @@ def cluster_keywords_hdbscan(keywords_df, embeddings, min_cluster_size=2, min_sa
     # Jakość klastra = średnia z prawdopodobieństw
     def calculate_cluster_quality(group):
         if len(group) <= 1:
+            group = group.copy()
+            group['Cluster_Quality'] = 1.0
             return group
         group = group.copy()
         group['Cluster_Quality'] = group['Cluster_Probability'].mean()
         return group
 
-    tmp2 = keywords_df.groupby('Klaster_ID', group_keys=False).apply(calculate_cluster_quality)
+    # >>> include_groups=False ponownie
+    tmp2 = keywords_df.groupby('Klaster_ID', group_keys=False).apply(calculate_cluster_quality, include_groups=False)
 
     # Ponownie dopilnuj, by Klaster_ID był kolumną
     if 'Klaster_ID' not in tmp2.columns:
@@ -279,49 +312,6 @@ def classify_article_type(keyword: str, cluster_size: int, intent: str) -> str:
     if cluster_size >= 5 and intent in ("Mieszana", "Transakcyjna"):
         return "Ranking/Lista"
     return "Temat ogólny"
-
-# === NOWE: kolumny RELATED/pytań tylko dla HEAD ===
-def build_related_columns_for_heads(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Dla każdego klastra: w wierszu HEAD uzupełnia dwie kolumny:
-    - 'Frazy_RELATED'      : HEAD + wszystkie frazy z klastra (jedna pod drugą)
-    - 'Powiązane_pytania'  : frazy w formie pytającej / informacyjnej (jedna pod drugą)
-    """
-    df = df.copy()
-
-    # upewnij się, że kolumny istnieją
-    if 'Frazy_RELATED' not in df.columns:
-        df['Frazy_RELATED'] = ''
-    if 'Powiązane_pytania' not in df.columns:
-        df['Powiązane_pytania'] = ''
-
-    required = {'Klaster_ID', 'HEAD_Keyword', 'Typ_w_klastrze', 'Słowo kluczowe'}
-    if not required.issubset(df.columns):
-        return df  # brak klastrów lub kolumn – nic nie robimy
-
-    q_patterns = ('co to', 'czym jest', 'jak ', 'jaki', 'jakie', 'jaką', 'gdzie', 'kiedy', 'czy')
-
-    for cid, g in df.groupby('Klaster_ID'):
-        head_kw = str(g['HEAD_Keyword'].iloc[0])
-        # wszystkie frazy z klastra; HEAD pierwszy
-        all_kw = pd.unique(g['Słowo kluczowe'].astype(str)).tolist()
-        all_kw_sorted = [head_kw] + [k for k in all_kw if k != head_kw]
-        related_str = "\n".join(all_kw_sorted)
-
-        # pytania z klastra (informacyjne i z wzorcem pytającym)
-        questions = []
-        for k in all_kw:
-            kl = k.lower()
-            if detect_search_intent(k) == 'Informacyjna' and any(p in kl for p in q_patterns):
-                questions.append(k)
-        questions_str = "\n".join(pd.unique(questions).tolist())
-
-        # zapis tylko do wiersza HEAD
-        mask_head = (df['Klaster_ID'] == cid) & (df['Typ_w_klastrze'] == 'HEAD')
-        df.loc[mask_head, 'Frazy_RELATED'] = related_str
-        df.loc[mask_head, 'Powiązane_pytania'] = questions_str
-
-    return df
 
 def calculate_priority_score(row):
     volume_score = min((row.get('Wolumen', 0) or 0) / 1000, 100)
@@ -626,7 +616,7 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
     skip_set = set()
     if backlog_file is not None:
         try:
-            df_backlog = pd.read_csv(backlog_file)
+            df_backlog = read_csv_robust(backlog_file)
             if 'Słowo kluczowe' in df_backlog.columns:
                 mask = False
                 for col in df_backlog.columns:
@@ -642,12 +632,12 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
 
     with st.spinner("Przeprowadzam analizę..."):
         try:
-            df_gap_raw = pd.read_csv(content_gap_file).dropna(subset=['Keyword']).astype({'Keyword': str})
+            df_gap_raw = read_csv_robust(content_gap_file).dropna(subset=['Keyword']).astype({'Keyword': str})
             # odfiltruj frazy oznaczone do pominięcia
             df_gap = df_gap_raw[~df_gap_raw['Keyword'].str.lower().isin(skip_set)].copy()
 
-            df_articles = pd.read_csv(my_articles_file)
-            df_ranking = pd.read_csv(ranking_file)
+            df_articles = read_csv_robust(my_articles_file)
+            df_ranking = read_csv_robust(ranking_file)
 
             df_articles.rename(columns={'Address': 'URL', 'Title 1': 'Title'}, inplace=True)
             df_articles.dropna(subset=['Title', 'URL'], inplace=True)
@@ -822,14 +812,10 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
         df_results['Wyklucz_następnym_razem'] = False
         df_results['Wygenerowano_tytuł'] = False
 
-        # === NOWE: Frazy RELATED i pytania w wierszu HEAD (jeśli mamy klastrowanie) ===
-        if enable_clustering and {'Klaster_ID','HEAD_Keyword','Typ_w_klastrze'}.issubset(df_results.columns):
-            df_results = build_related_columns_for_heads(df_results)
-        else:
-            if 'Frazy_RELATED' not in df_results.columns:
-                df_results['Frazy_RELATED'] = ''
-            if 'Powiązane_pytania' not in df_results.columns:
-                df_results['Powiązane_pytania'] = ''
+        # Kolumny na propozycje tematów
+        for col in ['Propozycja_tematu_1','Propozycja_tematu_2','Propozycja_tematu_3']:
+            if col not in df_results.columns:
+                df_results[col] = '-'
 
         st.success("✅ Analiza zakończona!")
 
@@ -839,12 +825,7 @@ if st.button("Uruchom Analizę Hybrydową", type="primary"):
             ascending=[True, False, False]
         ).reset_index(drop=True)
 
-        # Dodaj kolumny z propozycjami *na stałe*
-        for col in ['Propozycja_tematu_1','Propozycja_tematu_2','Propozycja_tematu_3']:
-            if col not in df_results_sorted.columns:
-                df_results_sorted[col] = '-'
-
-        # Zapisz WSZYSTKO do pamięci – kluczowe, aby nie kasowało się po kliknięciach
+        # Zapisz WSZYSTKO do pamięci – aby nie kasowało się po kliknięciach
         st.session_state["df_results"] = df_results_sorted.copy()
         st.session_state["df_gap_raw"] = df_gap_raw.copy()
         st.session_state["df_articles"] = df_articles.copy()
@@ -866,9 +847,7 @@ else:
     # Widok/kolumny
     view_cols = [
         'Priorytet','Priorytet_Score','Słowo kluczowe','Wolumen','Status',
-        'Grupa_tematyczna',
-        'Frazy_RELATED','Powiązane_pytania',  # <── NOWE kolumny w widoku
-        'Typ_artykułu','Rekomendacja_grupowania',
+        'Grupa_tematyczna','Typ_artykułu','Rekomendacja_grupowania',
         'Akcja / Dopasowany URL','Najbliższy_artykuł','Podobieństwo',
         'Intencja','Aktualna_pozycja',
         'Wybrane_do_tytułów','Wygenerowano_tytuł','Wyklucz_następnym_razem',
@@ -877,14 +856,14 @@ else:
     df_view = st.session_state["df_results"].copy()
     for c in view_cols:
         if c not in df_view.columns:
-            df_view[c] = '-' if c.startswith("Propozycja") or c in ('Frazy_RELATED','Powiązane_pytania') else (False if "Wy" in c else '-')
+            df_view[c] = '-' if c.startswith("Propozycja") else (False if "Wy" in c else '-')
 
     # Edycja w formularzu – zapis stabilny
     with st.form("plan_editor_form", clear_on_submit=False):
         edited_df = st.data_editor(
             df_view,
             column_order=[c for c in view_cols if c in df_view.columns],
-            use_container_width=True,
+            width="stretch",
             num_rows="dynamic",
             hide_index=True,
             column_config={
@@ -983,18 +962,17 @@ else:
     show_cols = [
         'Priorytet','Słowo kluczowe','Wolumen','Status',
         'Typ_artykułu','Rekomendacja_grupowania',
-        'Frazy_RELATED','Powiązane_pytania',  # <── NOWE w podsumowaniu
         'Propozycja_tematu_1','Propozycja_tematu_2','Propozycja_tematu_3',
         'Wyklucz_następnym_razem','Wygenerowano_tytuł'
     ]
     extras = [c for c in ['Grupa_tematyczna','Akcja / Dopasowany URL','Podobieństwo','Intencja','Aktualna_pozycja']
               if c in st.session_state["df_results"].columns]
-    st.dataframe(st.session_state["df_results"][show_cols + extras], use_container_width=True)
+    st.dataframe(st.session_state["df_results"][show_cols + extras], width="stretch")
 
 # =========================================
 # STAŁA SEKCJA EKSPORTU / POBIERANIA
 # =========================================
-st.subheader("☁️ Eksport / Pobieranie")
+st.subheader("☁️ Eksport / Pobierania")
 if not st.session_state.get("analysis_ready") or st.session_state.get("df_results") is None:
     st.info("Najpierw uruchom analizę, żeby włączyć eksport i pobieranie.")
 else:
