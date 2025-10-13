@@ -307,13 +307,18 @@ def calculate_priority_score(row):
 def compute_priority_bucket(series: pd.Series) -> pd.Series:
     """
     Zamienia Priorytet_Score na 1..10 (1 = najwyższy), stabilnie nawet przy duplikatach/małych próbach.
+    Ignoruje wartości NaN, pozostawiając je jako NaN.
     """
     n = int(series.shape[0])
     if n == 0:
         return series
-    ranks = series.rank(method="first", ascending=False)  # 1..n (1 = najwyższy score)
+    ranks = series.rank(method="first", ascending=False)  # rank() poprawnie obsługuje NaN, zostawiając je jako NaN
     step = max(n / 10.0, 1.0)
-    buckets = np.ceil(ranks / step).astype(int)          # 1..10
+
+    # Oblicz bucket, ale nie konwertuj na int. Wynik będzie float z NaN.
+    buckets = np.ceil(ranks / step)
+
+    # Zwróć buckets po przycięciu. Główny skrypt zajmie się konwersją do 'Int64'.
     return buckets.clip(1, 10)
 
 def find_first_competitor_url(row):
